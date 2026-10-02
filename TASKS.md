@@ -12,20 +12,45 @@ to check current progress.
 | `20261002T025657-e21631` | 2026-10-01 21:56:57 | Retrieve a 20-row job posting preview with descriptions and structured metadata (retry). | Complete | `./klc logs 20261002T025657-e21631` |
 | `20261002T032127-aa5075` | 2026-10-01 22:21:27 | Estimate Malawi extraction storage, then download if accessibility checks and the 20 GB gate pass (`estimate --download-if-safe`). | Failed: WRDS connection timeout during raw-position count | `./klc logs 20261002T032127-aa5075` |
 | `20261002T152310-a233db` | 2026-10-02 10:23:10 | Worldwide historical country coverage in resumable numeric person-ID batches (range width 1,000,000; 900-second query limit). | Running | `./klc logs 20261002T152310-a233db` |
-| `20261002T153034-8dd58f` | 2026-10-02 10:30:34 | Restart Malawi storage estimate and gated download with TCP keepalives and revised raw-position joins (`estimate --download-if-safe`). | Running: selecting Malawi cohort | `./klc logs 20261002T153034-8dd58f` |
+| `20261002T153034-8dd58f` | 2026-10-02 10:30:34 | Restart Malawi storage estimate and gated download with TCP keepalives and revised raw-position joins (`estimate --download-if-safe`). | Failed: WRDS SSL EOF during raw-position count | `./klc logs 20261002T153034-8dd58f` |
+| `20261002T214915-661800` | 2026-10-02 16:49:15 | Restart Malawi estimate and gated download with indexed raw-position person batches (`estimate --download-if-safe`). | Running: connected to WRDS; fresh estimate started | `./klc logs 20261002T214915-661800` |
 
 The command is `./klc logs JOB_ID` (plural). To check one job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
 
 ## Malawi restart
 
-Job `20261002T153034-8dd58f` started successfully and connected to WRDS.
-It runs a fresh estimate before any download; the access and 20 GB storage gates
-still apply. Previous partial artifacts remain available.
-The new estimate directory is
-`/gpfs/kellogg/proj/cxv7409/revelio_playground/results/malawi_estimate_20261002T153035796452Z/`;
-the planned data directory is
-`/gpfs/kellogg/proj/cxv7409/revelio_playground/data/malawi_20261002T153035796452Z/`.
+Job `20261002T214915-661800` started at 16:49:15 CDT on October 2 and connected
+to WRDS. It runs a fresh estimate before any download, retaining the accessibility
+checks and 20 GB storage gate. The worldwide coverage job was left running.
+
+Estimate directory:
+`/gpfs/kellogg/proj/cxv7409/revelio_playground/results/malawi_estimate_20261002T214916234061Z/`.
+Planned data directory:
+`/gpfs/kellogg/proj/cxv7409/revelio_playground/data/malawi_20261002T214916234061Z/`.
+
+The morning retry (`20261002T153034-8dd58f`) failed at 13:02:56 CDT with
+`SSL SYSCALL error: EOF detected` while counting raw positions. It selected
+258,626 people and counted 805,829 structured positions; no full download began.
+Its incomplete estimate and pilots remain under
+`results/malawi_estimate_20261002T153035796452Z/` (1,837,385 bytes).
+The logs establish connection loss, but do not identify why WRDS closed it.
+
+The full-cohort query plan scanned about 1.83 billion raw positions and included
+an unnecessary postings scan. Raw positions now use disjoint 1,000-person batches
+and a separate NULL-person query for counts, pilots, downloads, and unmatched
+checks. Seeded random-priority candidates are merged into one bounded global
+pilot; each phase retains its repeatable-read snapshot. Connection loss still
+fails explicitly and leaves incomplete artifacts.
+
+Live first, middle, last, and NULL-person batch counts returned 3,478, 3,726,
+2,350, and zero rows in 0.44, 1.55, 1.04, and 0.02 seconds, respectively. Their
+plans used indexes without scanning the full raw table. All 63 tests passed in
+an isolated KLC test directory, including integration tests. These checks do not
+establish completion of the new extraction.
+
+The remote script was backed up before replacement under
+`logs/malawi_restart_backup_20261002T214903Z/`; other remote edits were preserved.
 
 ## Batched worldwide coverage
 
@@ -35,7 +60,7 @@ across these disjoint ranges; missing person IDs have a separate final batch.
 The first range's live WRDS plan uses `individual_positions_user_id_idx`.
 Only aggregates are saved; no individual position records are downloaded.
 
-At the Malawi restart check, four worldwide batches had been saved: 7,235,667
+At the morning Malawi restart check, four worldwide batches had been saved: 7,235,667
 position records and 1,930,400 globally distinct people within the processed
 ranges. Batch five was running. These are partial counts, not worldwide totals.
 

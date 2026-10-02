@@ -118,6 +118,104 @@ class LinkedDataTests(unittest.TestCase):
         self.assertEqual(self.rows('individual_user_education_raw'), [('2', 1, 'valid')])
         self.assertEqual(self.rows('postings_cosmos_raw'), [('91', 'valid')])
 
+    def batched_rows(self):
+        records = []
+        for sql, params in m.raw_batches(self.adapter, self.sources):
+            records.extend(self.adapter.execute(sql, params).cursor.fetchall())
+        return records
+
+    def test_raw_batches_equal_full_selection_with_duplicates_and_nulls(self):
+        from collections import Counter
+        self.adapter.info['mw_raw_batch_size'] = 1
+        self.db.execute("INSERT INTO fixture.individual_positions_raw VALUES "
+                        "(2,21,'valid'), (1,11,'resident history'), "
+                        "(NULL,41,'null match'), (NULL,41,'null match'), "
+                        "(NULL,31,'outside'), (3,11,'wrong person')")
+        self.assertEqual(Counter(self.batched_rows()), Counter(self.rows('individual_positions_raw')))
+        batches = list(m.raw_batches(self.adapter, self.sources))
+        self.assertEqual([params.get('people', []) for _, params in batches], [['1'], ['2'], []])
+        self.assertTrue(all('mw_postings' not in sql and 'mw_companies' not in sql for sql, _ in batches))
+        unmatched = m.count_batches(self.adapter, m.raw_batches(self.adapter, self.sources, True), 'fixture')
+        self.assertEqual(unmatched, 1)  # User 2's foreign position lacks raw text.
+
+    def test_raw_batches_empty_cohort_keeps_null_branch(self):
+        self.adapter.info['mw_people'] = []
+        self.db.execute("INSERT INTO fixture.individual_positions_raw VALUES (NULL,41,'null match')")
+        self.assertEqual(self.batched_rows(), [(None, '41', 'null match')])
+        self.assertEqual(len(list(m.raw_batches(self.adapter, self.sources))), 1)
+
+    def test_batched_pilot_merges_global_priorities_and_caps_rows(self):
+        self.adapter.info['mw_raw_batch_size'] = 1
+        self.db.execute("INSERT INTO fixture.individual_positions_raw VALUES "
+                        "(1,11,'resident'), (NULL,41,'null match')")
+        priorities = iter([0.9, 0.5, 0.1])
+        def read_sql(sql, db, params=None, **kwargs):
+            frame = self.adapter.execute(sql, params).cursor.fetchdf()
+            frame['__malawi_pilot_priority'] = [next(priorities)] * len(frame)
+            return frame
+        sql = m.query('individual_positions_raw', self.sources['individual_positions_raw'], self.prefix)
+        with patch.object(pd, 'read_sql_query', side_effect=read_sql):
+            rows, frame = m.estimate_selection(self.adapter, 'individual_positions_raw', self.sources, sql, 2)
+        self.assertEqual(rows, 3)
+        self.assertEqual(frame['description'].tolist(), ['null match', 'valid'])
+        self.assertNotIn('__malawi_pilot_priority', frame)
+
+    def test_empty_batched_pilot_handles_pandas_object_columns(self):
+        sql = m.query('individual_positions_raw', self.sources['individual_positions_raw'], self.prefix)
+        columns = [c['column_name'] for c in self.sources['individual_positions_raw']['columns']]
+        empty = pd.DataFrame(columns=columns + ['__malawi_pilot_priority'])
+        with patch.object(pd, 'read_sql_query', return_value=empty):
+            _, frame = m.estimate_selection(self.adapter, 'individual_positions_raw', self.sources, sql, 2)
+        self.assertTrue(frame.empty)
+        self.assertEqual(list(frame.columns), columns)
+
+    def test_download_connection_loss_after_raw_part_is_incomplete(self):
+        import json
+        self.db.execute("INSERT INTO fixture.individual_positions_raw VALUES (1,11,'resident')")
+        original = m.raw_batches
+        calls = 0
+        def batches(db, sources, unmatched_rows=False):
+            nonlocal calls
+            calls += 1
+            for index, batch in enumerate(original(db, sources, unmatched_rows)):
+                if calls == 2 and index == 1:
+                    raise RuntimeError('connection lost during raw download')
+                yield batch
+        with tempfile.TemporaryDirectory() as folder, patch.object(m, 'raw_batches', side_effect=batches):
+            with self.assertRaisesRegex(RuntimeError, 'connection lost'):
+                self.download_fixture(folder)
+            manifest = json.loads((Path(folder) / 'data' / 'manifest.json').read_text())
+            self.assertEqual(manifest['status'], 'incomplete')
+            self.assertEqual(manifest['tables']['individual_positions_raw']['status'], 'incomplete')
+            self.assertEqual(manifest['tables']['individual_positions_raw']['rows'], 1)
+            self.assertEqual(manifest['raw_batch_size'], 1)
+
+    def test_estimate_batch_failure_retains_incomplete_report(self):
+        import json
+        def fail(*args, **kwargs):
+            raise RuntimeError('connection lost during batch')
+        with tempfile.TemporaryDirectory() as folder:
+            output = Path(folder) / 'estimate'
+            with patch.object(m, 'discover', return_value=(self.sources, [])), \
+                    patch.object(m, 'estimate_selection', side_effect=fail):
+                with self.assertRaisesRegex(RuntimeError, 'connection lost'):
+                    m.estimate(self.adapter, Path(folder), output, 100, raw_batch_size=1)
+            report = json.loads((output / 'estimate.json').read_text())
+            self.assertEqual(report['status'], 'incomplete')
+            self.assertEqual(report['raw_batch_size'], 1)
+            self.assertIn('connection lost', report['error'])
+
+    def test_download_uses_saved_raw_batch_size(self):
+        original = m.raw_batches
+        seen = []
+        def batches(db, sources, unmatched_rows=False):
+            seen.append(db.info['mw_raw_batch_size'])
+            yield from original(db, sources, unmatched_rows)
+        with tempfile.TemporaryDirectory() as folder, patch.object(m, 'raw_batches', side_effect=batches):
+            self.download_fixture(folder)
+        self.assertTrue(seen)
+        self.assertEqual(set(seen), {1})
+
     def test_referenced_and_domestic_mappings(self):
         self.assertEqual({r[0] for r in self.rows('school_mapping')}, {'201', '203'})
         self.assertEqual({r[0] for r in self.rows('company_mapping')}, {'100', '101', '102', '107'})
@@ -158,7 +256,7 @@ class LinkedDataTests(unittest.TestCase):
                                 rows=len(self.rows(name)), source=self.sources[name]['source'])
         if changed:
             tables['individual_positions']['rows'] += 1
-        report = dict(version=m.VERSION, status='complete', unavailable=[], planning_total_bytes=10000,
+        report = dict(raw_batch_size=1, version=m.VERSION, status='complete', unavailable=[], planning_total_bytes=10000,
                       sources=self.sources, tables=tables)
         output = Path(folder) / 'data'
         with patch.object(m, 'discover', return_value=(self.sources, [])):

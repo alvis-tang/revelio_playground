@@ -238,6 +238,15 @@ company sentiment scores are company context, not Malawi-only observations.
 Current products are extracted once; legacy/sample schemas and duplicate posting
 partitions are excluded. Raw matches use `EXISTS` to avoid multiplying rows.
 
+Raw positions use disjoint batches of 1,000 cohort members and a separate NULL-person
+query for counts, pilots, downloads, and unmatched-record checks. Set
+`--raw-batch-size` during estimation to change this; downloads reuse the saved value.
+Each batch queries only the needed positions tables. Pilot candidates receive
+seeded random priorities and are merged into one bounded global sample, so batches
+do not receive equal sampling weight. Batches share each phase's repeatable-read
+snapshot; connection loss fails that phase rather than silently reconnecting.
+Version 1 estimates require a fresh estimate with this workflow.
+
 WRDS is a read-only replica. The initial country scan retrieves only cohort IDs,
 which stay in Parquet on KLC. Subsequent read-only queries use those exact IDs;
 no source or temporary database tables are written. ID columns are text and

@@ -16,7 +16,7 @@ from wrds_data import connection
 
 BUDGET = 20_000_000_000
 RESERVE = 1_000_000
-VERSION = 1
+VERSION = 2
 SCHEMAS = {
     'individual': 'revelio_individual', 'postings': 'revelio_job_postings',
     'common': 'revelio_common', 'sentiment': 'revelio_sentiment',
@@ -270,6 +270,78 @@ def query(name, source, prefix=''):
     return prefix + 'SELECT ' + ', '.join(fields) + ' ' + selection(name).format(source=source['source'])
 
 
+def raw_batches(db, sources, unmatched_rows=False):
+    """Disjoint indexed person batches, followed by Malawi's NULL-person rows."""
+    size = db.info.get('mw_raw_batch_size', 1000)
+    if size < 1:
+        raise ValueError('raw-batch-size must be positive')
+    people = sorted(set(db.info.get('mw_people', [])))
+    raw = sources['individual_positions_raw']['source']
+    positions = sources['individual_positions']['source']
+    for start in range(0, len(people), size):
+        params = {'people': people[start:start + size]}
+        if unmatched_rows:
+            sql = (f'SELECT p.* FROM {positions} p WHERE p.user_id = ANY(CAST(:people AS numeric[])) '
+                   f'AND NOT EXISTS (SELECT 1 FROM {raw} r '
+                   'WHERE r.user_id=p.user_id AND r.position_id=p.position_id)')
+        else:
+            base = query('individual_positions_raw', sources['individual_positions_raw'])
+            fields = base[:base.index(' FROM ')]
+            sql = (fields + f' FROM {raw} t WHERE t.user_id = ANY(CAST(:people AS numeric[])) '
+                   f'AND EXISTS (SELECT 1 FROM {positions} p '
+                   'WHERE p.user_id=t.user_id AND p.position_id=t.position_id)')
+        yield sql, params
+    if unmatched_rows:
+        sql = (f"SELECT p.* FROM {positions} p WHERE p.user_id IS NULL AND p.country='Malawi' "
+               f'AND NOT EXISTS (SELECT 1 FROM {raw} r '
+               'WHERE r.user_id IS NULL AND r.position_id=p.position_id)')
+    else:
+        base = query('individual_positions_raw', sources['individual_positions_raw'])
+        fields = base[:base.index(' FROM ')]
+        sql = (fields + f' FROM {raw} t WHERE t.user_id IS NULL '
+               f'AND EXISTS (SELECT 1 FROM {positions} p '
+               "WHERE p.user_id IS NULL AND p.country='Malawi' AND p.position_id=t.position_id)")
+    yield sql, {}
+
+
+def table_batches(db, name, sources, sql):
+    if name == 'individual_positions_raw':
+        yield from raw_batches(db, sources)
+    else:
+        yield sql, {'people': db.info['mw_people']}
+
+
+def count_batches(db, batches, label):
+    total = 0
+    for index, (sql, params) in enumerate(batches, 1):
+        total += scalar(db, f'SELECT count(*) FROM ({sql}) selected', params)
+        print(f'{label}: batch {index}; cumulative {total:,} rows', flush=True)
+    return total
+
+
+def estimate_selection(db, name, sources, sql, pilot_rows):
+    """Merge local random-priority winners into one bounded global pilot."""
+    import pandas as pd
+    from sqlalchemy import text
+    rows = count_batches(db, table_batches(db, name, sources, sql), name)
+    execute(db, 'SELECT setseed(0.7409)')
+    priority = '__malawi_pilot_priority'
+    columns = {c['column_name'] for c in sources[name]['columns']}
+    while priority in columns:
+        priority += '_'
+    winners = None
+    for index, (batch_sql, params) in enumerate(table_batches(db, name, sources, sql), 1):
+        sample_sql = (f'SELECT selected.*, random() AS "{priority}" FROM ({batch_sql}) selected '
+                      f'ORDER BY "{priority}" LIMIT {pilot_rows}')
+        frame = pd.read_sql_query(text(sample_sql), db, params=params, coerce_float=False)
+        if winners is not None:
+            frame = pd.concat([winners, frame], ignore_index=True)
+        frame[priority] = pd.to_numeric(frame[priority])
+        winners = frame.nsmallest(pilot_rows, priority)
+        print(f'{name}: pilot batch {index}; retained {len(winners):,} rows', flush=True)
+    return rows, winners.drop(columns=[priority]).reset_index(drop=True)
+
+
 def unmatched(db, sources, prefix=''):
     result = {}
     for structured, raw, temporary_table, keys in [
@@ -277,6 +349,9 @@ def unmatched(db, sources, prefix=''):
         ('individual_user_education', 'individual_user_education_raw', 'mw_education', ['user_id', 'education_number']),
         ('postings_cosmos', 'postings_cosmos_raw', 'mw_postings', ['job_id']),
     ]:
+        if raw == 'individual_positions_raw' and raw in sources:
+            result[raw] = count_batches(db, raw_batches(db, sources, unmatched_rows=True), 'Unmatched positions')
+            continue
         if raw in sources:
             match = ' AND '.join(f'r.{key} IS NOT DISTINCT FROM p.{key}' if key == 'user_id' else f'r.{key}=p.{key}' for key in keys)
             result[raw] = scalar(db, prefix + f"SELECT count(*) FROM {temporary_table} p WHERE NOT EXISTS "
@@ -284,9 +359,9 @@ def unmatched(db, sources, prefix=''):
     return result
 
 
-def estimate(db, root, output, pilot_rows):
-    import pandas as pd
-    report = dict(version=VERSION, status='incomplete', started_at_utc=now(), country='Malawi',
+def estimate(db, root, output, pilot_rows, raw_batch_size=1000):
+    db.info['mw_raw_batch_size'] = raw_batch_size
+    report = dict(raw_batch_size=raw_batch_size, version=VERSION, status='incomplete', started_at_utc=now(), country='Malawi',
         budget_bytes=BUDGET, tables={}, unavailable=[], cohort='Residence or any historical Malawi work; full histories.',
         sampling='Seeded random priority over selected rows; four independently encoded pilot blocks.',
         margin=0.3, context_tables=['layoffs', 'sentiment_scores'], root=str(root))
@@ -305,13 +380,8 @@ def estimate(db, root, output, pilot_rows):
         for name, source in sources.items():
             sql = query(name, source, prefix)
             print('Counting ' + name, flush=True)
-            rows = scalar(db, f'SELECT count(*) FROM ({sql}) selected')
-            print(f'{name}: {rows:,} rows; sampling', flush=True)
-            # ORDER BY seeded random priorities samples the entire selected population.
-            execute(db, 'SELECT setseed(0.7409)')
-            from sqlalchemy import text
-            frame = pd.read_sql_query(text(sql + f' ORDER BY random() LIMIT {pilot_rows}'), db,
-                                      params={'people': db.info['mw_people']}, coerce_float=False)
+            rows, frame = estimate_selection(db, name, sources, sql, pilot_rows)
+            print(f'{name}: {rows:,} rows; pilot complete', flush=True)
             folder = output / name
             folder.mkdir()
             sizes, counts = [], []
@@ -326,6 +396,8 @@ def estimate(db, root, output, pilot_rows):
                 projected['planning_bytes'] = math.ceil(sum(sizes) * 1.3)
             report['tables'][name] = dict(source=source['source'], sql=sql, rows=rows,
                 pilot_rows=len(frame), pilot_block_bytes=sizes, pilot_block_rows=counts, **projected)
+            if name == 'individual_positions_raw':
+                report['tables'][name]['execution'] = 'person_batches_and_null'
             save(path, report)
             print(f"{name}: projected {projected['planning_bytes'] / 1e9:.3f} GB", flush=True)
         report['unmatched_raw'] = unmatched(db, sources, prefix)
@@ -346,6 +418,7 @@ def estimate(db, root, output, pilot_rows):
 def download(db, report, estimate_dir, output, chunksize):
     import pandas as pd
     gate(report)
+    db.info['mw_raw_batch_size'] = report.get('raw_batch_size', 1000)
     if shutil.disk_usage(output.parent).free < report['planning_total_bytes'] + RESERVE:
         raise ValueError('Insufficient KLC free storage for the planned extract.')
     sources, unavailable = discover(db)
@@ -358,13 +431,14 @@ def download(db, report, estimate_dir, output, chunksize):
         raise ValueError('People cohort changed; run a new estimate.')
     output.mkdir(exist_ok=False)
     manifest = dict(status='incomplete', started_at_utc=now(), estimate=str(estimate_dir),
-                    tables={}, budget_bytes=BUDGET, actual_bytes=0)
+                    tables={}, budget_bytes=BUDGET, actual_bytes=0,
+                    raw_batch_size=db.info['mw_raw_batch_size'])
     path = output / 'manifest.json'
     save(path, manifest)
     try:
         for name, table in report['tables'].items():
             sql = table['sql']
-            count = scalar(db, f'SELECT count(*) FROM ({sql}) selected')
+            count = count_batches(db, table_batches(db, name, sources, sql), name)
             if count != table['rows']:
                 raise ValueError(f'{name} row count changed; run a new estimate.')
             folder = output / name
@@ -374,21 +448,22 @@ def download(db, report, estimate_dir, output, chunksize):
             manifest['tables'][name] = state
             save(path, manifest)
             print(f'Downloading {name}: {count:,} rows', flush=True)
-            with db.execution_options(stream_results=True).execute(__import__('sqlalchemy').text(sql), {'people': db.info['mw_people']}) as result:
-                while True:
-                    records = result.fetchmany(chunksize)
-                    if not records:
-                        break
-                    frame = pd.DataFrame({name: pd.Series([r[index] for r in records], dtype=object)
-                                          for index, name in enumerate(result.keys())})
-                    size = write_part(frame, folder / f"part-{state['parts']:06d}.parquet",
-                                      footprint(estimate_dir) + footprint(output),
-                                      schema=arrow_schema(report['sources'].get(name, {'columns': [dict(column_name='user_id', data_type='text')]})))
-                    state['rows'] += len(frame)
-                    state['parts'] += 1
-                    state['bytes'] += size
-                    manifest['actual_bytes'] += size
-                    save(path, manifest)
+            for batch_sql, params in table_batches(db, name, sources, sql):
+                with db.execution_options(stream_results=True).execute(__import__('sqlalchemy').text(batch_sql), params) as result:
+                    while True:
+                        records = result.fetchmany(chunksize)
+                        if not records:
+                            break
+                        frame = pd.DataFrame({name: pd.Series([r[index] for r in records], dtype=object)
+                                              for index, name in enumerate(result.keys())})
+                        size = write_part(frame, folder / f"part-{state['parts']:06d}.parquet",
+                                          footprint(estimate_dir) + footprint(output),
+                                          schema=arrow_schema(report['sources'].get(name, {'columns': [dict(column_name='user_id', data_type='text')]})))
+                        state['rows'] += len(frame)
+                        state['parts'] += 1
+                        state['bytes'] += size
+                        manifest['actual_bytes'] += size
+                        save(path, manifest)
             db.execution_options(stream_results=False)
             if state['rows'] != count:
                 raise ValueError(f'{name}: extracted row count mismatch.')
@@ -415,12 +490,13 @@ def main(argv=None):
     parser.add_argument('command', choices=['estimate', 'download'])
     parser.add_argument('--estimate', type=Path, help='Completed estimate directory for download')
     parser.add_argument('--pilot-rows', type=int, default=2000)
+    parser.add_argument('--raw-batch-size', type=int, default=1000, help='People per raw-position query; download uses saved estimate value')
     parser.add_argument('--chunksize', type=int, default=5000)
     parser.add_argument('--timeout', type=int, default=21600, help='Per-statement timeout in seconds')
     parser.add_argument('--download-if-safe', action='store_true', help='Download after estimate passes all gates')
     args = parser.parse_args(argv)
-    if args.pilot_rows < 100 or args.chunksize < 1 or args.timeout < 1:
-        parser.error('pilot-rows >= 100, chunksize >= 1 and timeout >= 1 required')
+    if args.pilot_rows < 100 or args.chunksize < 1 or args.timeout < 1 or args.raw_batch_size < 1:
+        parser.error('pilot-rows >= 100, chunksize >= 1 and timeout >= 1 and raw-batch-size >= 1 required')
     root = Path(os.environ.get('KLC_ROOT', str(ROOT))).resolve()
     if not os.environ.get('KLC_ROOT') or not str(root).startswith(('/kellogg/proj/', '/gpfs/kellogg/proj/')):
         parser.error('Run through the KLC job toolkit; data must remain on KLC project storage')
@@ -432,7 +508,7 @@ def main(argv=None):
     with connection() as conn:
         if args.command == 'estimate':
             with session(conn, args.timeout) as db:
-                report = estimate(db, root, estimate_dir, args.pilot_rows)
+                report = estimate(db, root, estimate_dir, args.pilot_rows, args.raw_batch_size)
             if not args.download_if_safe:
                 return
         else:
