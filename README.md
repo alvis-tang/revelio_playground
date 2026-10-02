@@ -3,6 +3,9 @@
 Edit code from your Mac in VS Code; run Python and Stata on Kellogg Linux Cluster.
 WRDS remains the PostgreSQL data source. Large extracts stay on KLC project storage.
 
+For a detailed walkthrough explaining the extension installation, where to run
+commands, and what to do in future sessions, see [KLC_WORKFLOW.md](KLC_WORKFLOW.md).
+
 ## First-time setup
 
 1. Confirm your KLC login and an existing, writable project directory, such as
