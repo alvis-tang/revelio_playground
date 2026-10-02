@@ -99,6 +99,34 @@ Use `./klc status JOB_ID` and `./klc logs JOB_ID` to check completion; the finis
 log prints the totals and results directory. A full-history query can take time
 even though its output is small.
 
+To inspect accessible job posting data, download a small preview with full job
+descriptions and structured posting fields:
+
+```sh
+./klc run python scripts/job_descriptions_smoke.py --limit 20
+./klc status JOB_ID
+./klc logs JOB_ID
+```
+
+Make sure the new script is present in your KLC checkout before running it;
+bootstrap uploads only toolkit files. After committing and pushing code, pull it
+in the remote checkout after checking for local changes.
+
+The script samples nonempty descriptions from `revelio.postings_cosmos_raw` and
+left-joins `revelio.postings_cosmos` by `job_id`. It returns up to 20 observations
+with titles, company, geography, dates, salary, role, remote status, and source
+flags. Missing structured metadata remains null. This is an arbitrary sample,
+not a representative sample; the final output is capped even if joins duplicate
+rows. `--limit` accepts 1–100, and the query has a 60-second timeout.
+
+Full text is saved on KLC under `data/job_postings_preview_<timestamp>/` in
+`descriptions.jsonl` and `postings.csv`. Job IDs are strings to preserve precision;
+use text columns when importing CSV into spreadsheets. `summary.json` records
+completion, row count, returned fields, null counts, and SQL. Logs show five
+compact previews and the output path. Zero results or query/access failures fail
+the job; check permissions and authenticate interactively with `./klc doctor`
+before retrying if needed.
+
 The extraction and Stata export examples below are optional workflows. They
 download records to KLC as Parquet files and create a local Stata dataset,
 consuming KLC storage; they are not needed for counts-only country coverage.
