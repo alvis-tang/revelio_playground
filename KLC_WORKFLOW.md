@@ -227,6 +227,106 @@ toolkit does not resume them. Inspect logs, fix the problem, and rerun into a ne
 directory. Stata export defaults to at most 100,000 rows; build a smaller aggregate
 or subset in SQL for analysis instead of exporting the whole database.
 
+## First country-coverage analysis: edit on Mac, run on KLC
+
+This example counts position records and distinct people by recorded country
+across all available history. Edit the code in the Mac checkout (including when
+working through this chat), push it to GitHub, and pull it into the KLC checkout.
+WRDS performs the aggregation; only country-level results are saved on KLC.
+
+First verify your connection and discover the positions table and columns.
+
+**Mac terminal:**
+
+```sh
+cd /Users/alvis/work/github/revelio_playground
+./klc doctor
+./klc wrds discover
+./klc wrds discover --schema ACTUAL_SCHEMA
+./klc wrds discover --schema ACTUAL_SCHEMA --table ACTUAL_TABLE
+```
+
+Replace `ACTUAL_SCHEMA` and `ACTUAL_TABLE` with identifiers returned by discovery.
+Confirm the recorded position-country field and stable person identifier. Check
+the source documentation to establish that one row represents one position,
+rather than a monthly observation or another repeated record. The repository's
+`revelio.individual_positions`, `country`, and `user_id` are examples, not verified
+identifiers for your subscription. Do not select an arbitrary table if several
+positions products are available.
+
+Live discovery verified `revelio_individual.individual_positions`, with `country`
+as the recorded country, numeric `user_id` as the person identifier, and
+`position_id` as the position identifier. Its fields include position start/end
+dates rather than monthly observation dates. WRDS estimated about 1.83 billion
+rows at discovery, so exact full-history distinct counts can take hours. Counts
+remain source-record counts; discovery does not establish position-ID uniqueness.
+The script preserves numeric person IDs and trims blank text IDs when applicable.
+
+Once the analysis code is committed and pushed, update the remote checkout.
+
+**KLC terminal in remote VS Code:**
+
+```sh
+cd /kellogg/proj/cxv7409/revelio_playground
+git status --short
+git pull --ff-only
+```
+
+Review any remote changes before pulling; preserve them rather than resetting
+the checkout. Bootstrap does not synchronize the new research script.
+
+Launch the analysis with the verified identifiers. Replace all four uppercase
+placeholders before running this command.
+
+**Mac terminal:**
+
+```sh
+./klc run python scripts/country_coverage.py \
+  --schema ACTUAL_SCHEMA --table ACTUAL_TABLE \
+  --country-column ACTUAL_COUNTRY_COLUMN --person-column ACTUAL_PERSON_COLUMN
+./klc status JOB_ID
+./klc logs JOB_ID
+```
+
+For that verified source, the launch command is:
+
+```sh
+./klc run python scripts/country_coverage.py \
+  --schema revelio_individual --table individual_positions \
+  --country-column country --person-column user_id
+```
+
+Replace `JOB_ID` with the ID printed at launch. This is a full-history database
+aggregation and may take time even though its output is small. Use `./klc submit`
+instead of `./klc run` for overnight work once Reserve access is configured.
+Approve any required Duo request and inspect failed job logs before retrying.
+
+**Output location on KLC:** the job prints an absolute directory under
+`results/country_coverage_<UTC timestamp>/`. Open it in remote VS Code to inspect:
+
+- `countries.csv`: country, missing-country flag, position records, distinct
+  people, records missing person IDs, and percentage of all position records.
+- `summary.json`: completion status, global totals, named-country count,
+  missing-country records, source identifiers, SQL, UTC execution times, elapsed
+  seconds, and counting definitions. Its presence with `status: complete` is the
+  output completion marker; also check that the job status is `complete`.
+
+Country position counts add to the global record count, and position shares
+include missing-country records in their denominator. Country people counts do
+not add to the globally distinct total: someone with jobs in two countries
+appears in both. NULL and blank person IDs are excluded from distinct counts and
+reported separately. Country and person strings are trimmed; country labels are
+not otherwise recoded. Missing/blank countries are labeled `Unknown` with
+`country_missing=True`, so a literal source label `Unknown` remains distinguishable.
+Historical counts describe the accessible dataset, not current employment or
+national population headcounts. An empty source produces a header-only CSV and
+zero totals.
+
+Code belongs on GitHub; results remain on KLC and are ignored by Git. Offline
+validation uses `python3 -m unittest discover -s tests -v`; install
+`requirements-klc.txt` and the development-only `duckdb` package to run all
+serialization and country-query tests. DuckDB is not needed for production.
+
 ## Large or overnight jobs
 
 Find your actual Reserve account and partition through your existing allocation
