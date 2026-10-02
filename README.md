@@ -190,3 +190,59 @@ References: [KLC SSH](https://rs-kellogg.github.io/krs-documentation/services/kl
 [WRDS from KLC](https://rs-kellogg.github.io/krs-documentation/services/kellogg-data-hosting/wrds/wrds.html),
 [KLC Reserve](https://rs-kellogg.github.io/krs-documentation/services/klc-reserve/when-to-use.html),
 [WRDS PostgreSQL (login required)](https://wrds-www.wharton.upenn.edu/pages/support/programming-wrds/wrds-data-postgresql/wrds-data-in-postgresql/).
+
+## Malawi download with a 20 GB gate
+
+Run the Malawi workflow on KLC, after synchronizing `scripts/malawi_extract.py`:
+
+```sh
+./klc run python scripts/malawi_extract.py estimate --download-if-safe
+./klc status JOB_ID
+./klc logs JOB_ID
+```
+
+This persistent job first estimates all current Malawi-linked products and only
+then downloads if every requested product is accessible and the planning total
+fits within **20,000,000,000 bytes**. No sampling fallback runs automatically.
+Reserve is preferable when an allocation is available; the default per-statement
+WRDS timeout is six hours. Existing jobs are left running.
+
+People qualify through Malawi residence or any historical Malawi position. Their
+full available employment, education, skills, profiles, and raw text are included.
+The extract also contains Malawi postings and descriptions, workforce observations,
+reviews, domestic and referenced companies/schools, and lookup tables. Layoffs and
+company sentiment scores are company context, not Malawi-only observations.
+Current products are extracted once; legacy/sample schemas and duplicate posting
+partitions are excluded. Raw matches use `EXISTS` to avoid multiplying rows.
+
+WRDS is a read-only replica. The initial country scan retrieves only cohort IDs,
+which stay in Parquet on KLC. Subsequent read-only queries use those exact IDs;
+no source or temporary database tables are written. ID columns are text and
+NUMERIC values retain decimal precision. The initial cohort scan and exact
+per-product counts can take substantial time.
+
+Estimates live under `results/malawi_estimate_<timestamp>/`: `estimate.json`,
+cohort identifiers, and bounded seeded pilots of up to 2,000 rows per table.
+Compressed pilots are split into four blocks. The planning bound uses the larger
+of the overall or largest-block bytes-per-row projection, plus 30%, retained
+estimate artifacts, and metadata reserve. This is a heuristic storage estimate,
+not a statistical confidence guarantee; writing also enforces the actual cap.
+Missing products and unmatched raw-record counts are reported explicitly.
+
+To estimate without starting the download, omit `--download-if-safe`. To download
+from a completed estimate that passed all gates:
+
+```sh
+./klc run python scripts/malawi_extract.py download \
+  --estimate /kellogg/proj/cxv7409/revelio_playground/results/malawi_estimate_TIMESTAMP
+```
+
+If the planning bound exceeds 20 GB, or any product is unavailable, the job stops
+for review. Downloads live under `data/malawi_<timestamp>/`, with separate Parquet
+parts and per-table/global manifests. Both phases use repeatable-read snapshots;
+changed cohort IDs, schemas, or selected counts require a new estimate. Each part
+is encoded before writing, checked against storage availability and the remaining
+budget including retained estimates, and read back for verification. Failures
+leave an `incomplete` manifest; rerun into a new directory. Check both job status
+and the global manifest before using the data. Empty products have zero rows and
+no Parquet parts. All data, pilots, and identifiers remain ignored by Git.
