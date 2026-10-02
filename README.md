@@ -66,6 +66,12 @@ language; subsequent arguments belong to your script.
 
 ## WRDS PostgreSQL and large data
 
+Use [revelio_tables.log](revelio_tables.log) as the data dictionary for Revelio
+tables available directly through the SQL server. It lists the tables, approximate
+row counts, column names, data types, nullability, and column descriptions from
+the September 30, 2026 schema discovery. Refer to it when choosing tables and
+fields for queries; use the discovery commands below to check the current schema.
+
 ```sh
 ./klc wrds discover
 ./klc wrds discover --schema revelio
