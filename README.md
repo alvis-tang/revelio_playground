@@ -66,6 +66,10 @@ language; subsequent arguments belong to your script.
 
 ## WRDS PostgreSQL and large data
 
+KLC account storage is limited. The intended workflow retrieves aggregate counts
+and results: raw Revelio records stay on WRDS, and aggregation runs in WRDS
+PostgreSQL. Only the small aggregate results are returned to KLC.
+
 Use [revelio_tables.log](revelio_tables.log) as the data dictionary for Revelio
 tables available directly through the SQL server. It lists the tables, approximate
 row counts, column names, data types, nullability, and column descriptions from
@@ -77,6 +81,27 @@ fields for queries; use the discovery commands below to check the current schema
 ./klc wrds discover --schema revelio
 ./klc wrds discover --schema revelio --table individual_positions
 ```
+
+For historical country coverage, run the counts-only script against
+`revelio_individual.individual_positions`:
+
+```sh
+./klc run python scripts/country_coverage.py \
+  --schema revelio_individual --table individual_positions \
+  --country-column country --person-column user_id
+```
+
+This computes position counts and distinct people by country and globally across
+all available history on WRDS. It saves only `countries.csv` and `summary.json`
+under `results/country_coverage_<timestamp>/`, plus job logs and metadata under
+`logs/jobs/JOB_ID/`, on KLC. It does not download individual position records.
+Use `./klc status JOB_ID` and `./klc logs JOB_ID` to check completion; the finished
+log prints the totals and results directory. A full-history query can take time
+even though its output is small.
+
+The extraction and Stata export examples below are optional workflows. They
+download records to KLC as Parquet files and create a local Stata dataset,
+consuming KLC storage; they are not needed for counts-only country coverage.
 
 Inspect actual tables/columns for your subscription. Example SQL assumes
 `revelio.individual_positions`; adjust identifiers after discovery. Values use bound
