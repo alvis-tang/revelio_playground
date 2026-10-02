@@ -9,6 +9,14 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def connect_args():
+    """Preserve WRDS defaults while keeping long, silent queries connected."""
+    from wrds.sql import WRDS_CONNECT_ARGS
+    return {**WRDS_CONNECT_ARGS, 'connect_timeout': 30, 'keepalives': 1,
+            'keepalives_idle': 30, 'keepalives_interval': 30,
+            'keepalives_count': 9}
+
+
 @contextmanager
 def connection():
     import wrds
@@ -19,7 +27,8 @@ def connection():
     from unittest.mock import patch
     try:
         with patch('builtins.input', side_effect=ValueError('WRDS authentication failed; run credentials and doctor interactively.')):
-            conn = wrds.Connection(wrds_username=settings['wrds_username'])
+            conn = wrds.Connection(wrds_username=settings['wrds_username'],
+                                   wrds_connect_args=connect_args())
     except Exception:
         raise ValueError('WRDS connection failed. Check credentials, network, and Duo using ./klc doctor.') from None
     try:

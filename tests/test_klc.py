@@ -5,6 +5,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 from unittest.mock import MagicMock
@@ -39,6 +40,36 @@ class Frame:
 
 
 class ToolkitTests(unittest.TestCase):
+    def test_wrds_keepalives_preserve_client_defaults(self):
+        defaults = {'sslmode': 'require', 'application_name': 'wrds-test'}
+        sql = types.ModuleType('wrds.sql')
+        sql.WRDS_CONNECT_ARGS = defaults
+        with patch.dict('sys.modules', {'wrds.sql': sql}):
+            args = data.connect_args()
+        self.assertEqual(args['sslmode'], 'require')
+        self.assertEqual(args['application_name'], 'wrds-test')
+        self.assertEqual(args['keepalives_idle'], 30)
+        self.assertEqual(args['keepalives_interval'], 30)
+        self.assertEqual(args['keepalives_count'], 9)
+        self.assertEqual(args['keepalives'], 1)
+        self.assertEqual(args['connect_timeout'], 30)
+        self.assertEqual(defaults, {'sslmode': 'require', 'application_name': 'wrds-test'})
+
+    def test_wrds_connection_passes_options_and_closes_on_failure(self):
+        wrds = types.ModuleType('wrds')
+        wrds.Connection = MagicMock()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / '.klc').mkdir()
+            (root / '.klc/config.json').write_text(json.dumps({'wrds_username': 'fixture'}))
+            (root / '.pgpass').touch()
+            with patch.dict('sys.modules', {'wrds': wrds}), patch.object(data, 'ROOT', root), patch.object(data.Path, 'home', return_value=root), patch.object(data, 'connect_args', return_value={'keepalives_idle': 30}):
+                with self.assertRaisesRegex(RuntimeError, 'query failed'):
+                    with data.connection():
+                        raise RuntimeError('query failed')
+        wrds.Connection.assert_called_once_with(wrds_username='fixture', wrds_connect_args={'keepalives_idle': 30})
+        wrds.Connection.return_value.close.assert_called_once_with()
+
     def test_missing_config(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(local, 'CONFIG', Path(folder) / 'missing'):
             with self.assertRaisesRegex(ValueError, 'setup'):

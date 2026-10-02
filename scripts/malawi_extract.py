@@ -202,8 +202,15 @@ def selection(name):
     if name == 'individual_user_education':
         return 'FROM mw_education t'
     if name == 'individual_positions_raw':
-        return ('FROM {source} t WHERE EXISTS (SELECT 1 FROM mw_positions p '
-                'WHERE p.user_id IS NOT DISTINCT FROM t.user_id AND p.position_id=t.position_id)')
+        # Separate NULL IDs so the normal branch can use indexed equality joins.
+        # EXISTS preserves raw duplicates without multiplying structured matches;
+        # the branches are disjoint, so UNION ALL preserves the selected rows.
+        return ('FROM (SELECT r.* FROM {source} r WHERE r.user_id IS NOT NULL '
+                'AND EXISTS (SELECT 1 FROM mw_positions p '
+                'WHERE p.user_id=r.user_id AND p.position_id=r.position_id) '
+                'UNION ALL SELECT r.* FROM {source} r WHERE r.user_id IS NULL '
+                'AND EXISTS (SELECT 1 FROM mw_positions p WHERE p.user_id IS NULL '
+                'AND p.position_id=r.position_id)) t')
     if name == 'individual_user_education_raw':
         return ('FROM {source} t WHERE EXISTS (SELECT 1 FROM mw_education e '
                 'WHERE e.user_id=t.user_id AND e.education_number=t.education_number)')

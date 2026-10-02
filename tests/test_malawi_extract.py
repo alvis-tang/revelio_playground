@@ -218,6 +218,16 @@ class LinkedDataTests(unittest.TestCase):
         self.db.execute("INSERT INTO fixture.individual_positions_raw VALUES (NULL, 41, 'null person')")
         self.assertIn((None, '41', 'null person'), self.rows('individual_positions_raw'))
 
+    def test_raw_null_branches_preserve_duplicates_and_reject_wrong_people(self):
+        self.db.execute("INSERT INTO fixture.individual_positions_raw VALUES "
+                        "(NULL, 41, 'null person'), (NULL, 41, 'null person'), "
+                        "(3, 41, 'wrong person'), (NULL, 21, 'wrong null person'), "
+                        "(2, 21, 'valid')")
+        records = self.rows('individual_positions_raw')
+        self.assertEqual(records.count((None, '41', 'null person')), 2)
+        self.assertEqual(records.count(('2', '21', 'valid')), 2)
+        self.assertEqual(len(records), 4)
+
     def test_review_time_roundtrip(self):
         from datetime import time
         source = dict(columns=[dict(column_name='review_time', data_type='time without time zone')])
