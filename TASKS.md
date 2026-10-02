@@ -11,9 +11,34 @@ to check current progress.
 | `20261002T025453-64ba9e` | 2026-10-01 21:54:53 | Retrieve a 20-row job posting preview with descriptions and structured metadata (first attempt). | Failed | `./klc logs 20261002T025453-64ba9e` |
 | `20261002T025657-e21631` | 2026-10-01 21:56:57 | Retrieve a 20-row job posting preview with descriptions and structured metadata (retry). | Complete | `./klc logs 20261002T025657-e21631` |
 | `20261002T032127-aa5075` | 2026-10-01 22:21:27 | Estimate Malawi extraction storage, then download if accessibility checks and the 20 GB gate pass (`estimate --download-if-safe`). | Failed: WRDS connection timeout during raw-position count | `./klc logs 20261002T032127-aa5075` |
+| `20261002T152310-a233db` | 2026-10-02 10:23:10 | Worldwide historical country coverage in resumable numeric person-ID batches (range width 1,000,000; 900-second query limit). | Running | `./klc logs 20261002T152310-a233db` |
 
 The command is `./klc logs JOB_ID` (plural). To check one job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
+
+## Batched worldwide coverage
+
+The replacement worldwide job runs sequentially on KLC and saves cumulative
+counts after each successful ID range. Distinct-person counts are additive
+across these disjoint ranges; missing person IDs have a separate final batch.
+The first range's live WRDS plan uses `individual_positions_user_id_idx`.
+Only aggregates are saved; no individual position records are downloaded.
+
+Results and checkpoint:
+`/gpfs/kellogg/proj/cxv7409/revelio_playground/results/country_coverage_20261002T152311370265Z/`.
+If interrupted, resume with:
+
+```sh
+./klc run python scripts/country_coverage.py \
+  --schema revelio_individual --table individual_positions \
+  --country-column country --person-column user_id \
+  --resume /gpfs/kellogg/proj/cxv7409/revelio_playground/results/country_coverage_20261002T152311370265Z
+```
+
+Final `countries.csv` and `summary.json` are written after all ranges and the
+missing-ID batch finish. Batches use separate snapshots; source updates during
+or between runs can affect the combined totals. The ID bounds are fixed when
+the run starts. Full worldwide results are pending.
 
 ## Timeout investigation (October 2)
 

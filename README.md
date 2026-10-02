@@ -88,16 +88,39 @@ For historical country coverage, run the counts-only script against
 ```sh
 ./klc run python scripts/country_coverage.py \
   --schema revelio_individual --table individual_positions \
-  --country-column country --person-column user_id
+  --country-column country --person-column user_id --batches
 ```
 
 This computes position counts and distinct people by country and globally across
-all available history on WRDS. It saves only `countries.csv` and `summary.json`
+all available history on WRDS. It saves final `countries.csv` and `summary.json`
 under `results/country_coverage_<timestamp>/`, plus job logs and metadata under
 `logs/jobs/JOB_ID/`, on KLC. It does not download individual position records.
 Use `./klc status JOB_ID` and `./klc logs JOB_ID` to check completion; the finished
 log prints the totals and results directory. A full-history query can take time
 even though its output is small.
+
+For worldwide coverage, `--batches` uses indexed numeric person-ID ranges of
+1,000,000 ID values (not rows) and a separate NULL-ID batch. Each person stays
+in one range, so distinct counts remain additive across batches, including the
+global total. `--batch-size` changes the range width; `--query-timeout` defaults
+to 900 seconds per statement. Batches run sequentially and save cumulative
+aggregates and the next range atomically in `checkpoint.json`. Transport failures
+retry the unsaved batch twice on a fresh connection; statement timeouts stop
+with the checkpoint intact. No individual records are downloaded.
+
+To resume, run the same command with `--resume` pointing to the results directory
+printed in the log. Resume uses the saved batch width and refuses concurrent
+workers for the same directory. Only a finished run produces the final CSV and
+completion summary. Each batch has its own database snapshot: changes to WRDS
+data during or between runs can affect the results, and ID bounds are fixed at
+the start. Omit `--batches` for the original single-snapshot query.
+
+```sh
+./klc run python scripts/country_coverage.py \
+  --schema revelio_individual --table individual_positions \
+  --country-column country --person-column user_id \
+  --resume /kellogg/proj/YOUR_NETID/revelio_playground/results/country_coverage_TIMESTAMP
+```
 
 To inspect accessible job posting data, download a small preview with full job
 descriptions and structured posting fields:

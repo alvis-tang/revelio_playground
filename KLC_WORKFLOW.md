@@ -293,11 +293,14 @@ For that verified source, the launch command is:
 ```sh
 ./klc run python scripts/country_coverage.py \
   --schema revelio_individual --table individual_positions \
-  --country-column country --person-column user_id
+  --country-column country --person-column user_id --batches
 ```
 
 Replace `JOB_ID` with the ID printed at launch. This is a full-history database
-aggregation and may take time even though its output is small. Use `./klc submit`
+aggregation in resumable person-ID batches. Each successful batch saves a
+`checkpoint.json` in the results directory printed in the log; use the same
+source arguments with `--resume RESULTS_DIRECTORY` after an interruption.
+It may take time even though its output is small. Use `./klc submit`
 instead of `./klc run` for overnight work once Reserve access is configured.
 Approve any required Duo request and inspect failed job logs before retrying.
 

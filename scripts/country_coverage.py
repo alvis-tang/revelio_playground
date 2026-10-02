@@ -21,7 +21,7 @@ def identifier(value):
     return '"' + value + '"'
 
 
-def coverage_sql(schema, table, country_column, person_column, person_is_numeric=False):
+def coverage_sql(schema, table, country_column, person_column, person_is_numeric=False, where=''):
     source = f'{identifier(schema)}.{identifier(table)}'
     country, person = identifier(country_column), identifier(person_column)
     person_expression = person if person_is_numeric else f"NULLIF(TRIM(CAST({person} AS TEXT)), '')"
@@ -36,7 +36,7 @@ SELECT country,
 FROM (
     SELECT NULLIF(TRIM(CAST({country} AS TEXT)), '') AS country,
            {person_expression} AS person_id
-    FROM {source}
+    FROM {source}{' WHERE ' + where if where else ''}
 ) AS positions
 GROUP BY GROUPING SETS ((country), ())
 ORDER BY is_total, position_records DESC, country
@@ -88,6 +88,11 @@ def summarize(records):
 def save_results(root, countries, summary, started_at):
     output = Path(root) / 'results' / ('country_coverage_' + started_at.strftime('%Y%m%dT%H%M%S%fZ'))
     output.mkdir(parents=True, exist_ok=False)
+    write_results(output, countries, summary)
+    return output
+
+
+def write_results(output, countries, summary):
     columns = ('country', 'country_missing', 'position_records', 'people',
                'missing_person_records', 'position_share_pct')
     with (output / 'countries.csv').open('w', newline='', encoding='utf-8') as stream:
@@ -98,7 +103,6 @@ def save_results(root, countries, summary, started_at):
     temporary = output / 'summary.json.tmp'
     temporary.write_text(json.dumps(summary, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     temporary.replace(output / 'summary.json')
-    return output
 
 
 def main(argv=None):
@@ -106,9 +110,19 @@ def main(argv=None):
     for name in ('schema', 'table', 'country-column', 'person-column'):
         parser.add_argument('--' + name, required=True,
                             help='Verified WRDS identifier; run ./klc wrds discover first')
+    parser.add_argument('--batches', action='store_true', help='Checkpoint counts in numeric person-ID ranges')
+    parser.add_argument('--batch-size', type=int, default=1_000_000, help='ID range width, not row count')
+    parser.add_argument('--query-timeout', type=int, default=900, help='Per-batch statement timeout in seconds')
+    parser.add_argument('--resume', type=Path, help='Resume an existing batched results directory')
     args = parser.parse_args(argv)
     # Validate identifiers before any network access.
     coverage_sql(args.schema, args.table, args.country_column, args.person_column)
+    if args.batch_size < 1 or args.query_timeout < 1:
+        parser.error('batch-size and query-timeout must be positive')
+    if args.batches or args.resume:
+        from country_coverage_batches import run
+        run(args)
+        return
     started_at = datetime.now(timezone.utc)
     started = time.monotonic()
     print(f'Source: {args.schema}.{args.table}; all available history', flush=True)
