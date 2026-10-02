@@ -1,0 +1,27 @@
+# Never version large datasets
+data/
+proc/
+tables/
+
+# Logs
+logs/
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# R
+.Rhistory
+.RData
+
+# LaTeX build artifacts (optional)
+*.aux
+*.log
+*.out
+*.toc
+
