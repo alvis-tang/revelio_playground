@@ -12,9 +12,20 @@ to check current progress.
 | `20261002T025657-e21631` | 2026-10-01 21:56:57 | Retrieve a 20-row job posting preview with descriptions and structured metadata (retry). | Complete | `./klc logs 20261002T025657-e21631` |
 | `20261002T032127-aa5075` | 2026-10-01 22:21:27 | Estimate Malawi extraction storage, then download if accessibility checks and the 20 GB gate pass (`estimate --download-if-safe`). | Failed: WRDS connection timeout during raw-position count | `./klc logs 20261002T032127-aa5075` |
 | `20261002T152310-a233db` | 2026-10-02 10:23:10 | Worldwide historical country coverage in resumable numeric person-ID batches (range width 1,000,000; 900-second query limit). | Running | `./klc logs 20261002T152310-a233db` |
+| `20261002T153034-8dd58f` | 2026-10-02 10:30:34 | Restart Malawi storage estimate and gated download with TCP keepalives and revised raw-position joins (`estimate --download-if-safe`). | Running: selecting Malawi cohort | `./klc logs 20261002T153034-8dd58f` |
 
 The command is `./klc logs JOB_ID` (plural). To check one job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
+
+## Malawi restart
+
+Job `20261002T153034-8dd58f` started successfully and connected to WRDS.
+It runs a fresh estimate before any download; the access and 20 GB storage gates
+still apply. Previous partial artifacts remain available.
+The new estimate directory is
+`/gpfs/kellogg/proj/cxv7409/revelio_playground/results/malawi_estimate_20261002T153035796452Z/`;
+the planned data directory is
+`/gpfs/kellogg/proj/cxv7409/revelio_playground/data/malawi_20261002T153035796452Z/`.
 
 ## Batched worldwide coverage
 
@@ -23,6 +34,10 @@ counts after each successful ID range. Distinct-person counts are additive
 across these disjoint ranges; missing person IDs have a separate final batch.
 The first range's live WRDS plan uses `individual_positions_user_id_idx`.
 Only aggregates are saved; no individual position records are downloaded.
+
+At the Malawi restart check, four worldwide batches had been saved: 7,235,667
+position records and 1,930,400 globally distinct people within the processed
+ranges. Batch five was running. These are partial counts, not worldwide totals.
 
 Results and checkpoint:
 `/gpfs/kellogg/proj/cxv7409/revelio_playground/results/country_coverage_20261002T152311370265Z/`.
@@ -66,7 +81,8 @@ The connection helper now preserves WRDS defaults and requests TCP keepalives
 after 30 seconds, repeated every 30 seconds, with nine missed probes tolerated.
 Its 30-second connect timeout limits connection establishment only. Keepalives
 can help with idle network expiry, but cannot guarantee recovery from outages
-or make expensive SQL faster. Failed jobs have not been restarted.
+or make expensive SQL faster. Replacement jobs are listed above; the original
+failed job records and artifacts are preserved.
 
 A synthetic-ID `EXPLAIN` showed that the raw-position null-safe join chose a
 parallel full-table scan, while equality chose indexed position-ID lookups.
