@@ -124,6 +124,21 @@ class LinkedDataTests(unittest.TestCase):
             records.extend(self.adapter.execute(sql, params).cursor.fetchall())
         return records
 
+    def test_unmatched_education_batches_preserve_duplicates_and_exclude_null_people(self):
+        self.adapter.info['mw_raw_batch_size'] = 1
+        self.db.execute('INSERT INTO fixture.individual_user_education VALUES '
+                        '(2, 3, 201), (2, 3, 201), (1, NULL, 201), (NULL, 1, 201)')
+        self.db.execute("INSERT INTO fixture.individual_user_education_raw VALUES (NULL, 1, 'outside')")
+        full_sql = self.prefix + ('SELECT count(*) FROM mw_education p WHERE NOT EXISTS '
+            '(SELECT 1 FROM fixture.individual_user_education_raw r '
+            'WHERE r.user_id IS NOT DISTINCT FROM p.user_id AND r.education_number=p.education_number)')
+        expected = self.db.execute(full_sql, {'people': self.adapter.info['mw_people']}).fetchone()[0]
+        result = m.unmatched(self.adapter, self.sources, self.prefix)
+        self.assertEqual(result['individual_user_education_raw'], expected)
+        self.assertEqual(expected, 3)
+        self.adapter.info['mw_people'] = []
+        self.assertEqual(m.unmatched(self.adapter, self.sources, self.prefix)['individual_user_education_raw'], 0)
+
     def test_raw_batches_equal_full_selection_with_duplicates_and_nulls(self):
         from collections import Counter
         self.adapter.info['mw_raw_batch_size'] = 1

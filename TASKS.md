@@ -13,12 +13,40 @@ to check current progress.
 | `20261002T032127-aa5075` | 2026-10-01 22:21:27 | Estimate Malawi extraction storage, then download if accessibility checks and the 20 GB gate pass (`estimate --download-if-safe`). | Failed: WRDS connection timeout during raw-position count | `./klc logs 20261002T032127-aa5075` |
 | `20261002T152310-a233db` | 2026-10-02 10:23:10 | Worldwide historical country coverage in resumable numeric person-ID batches (range width 1,000,000; 900-second query limit). | Running | `./klc logs 20261002T152310-a233db` |
 | `20261002T153034-8dd58f` | 2026-10-02 10:30:34 | Restart Malawi storage estimate and gated download with TCP keepalives and revised raw-position joins (`estimate --download-if-safe`). | Failed: WRDS SSL EOF during raw-position count | `./klc logs 20261002T153034-8dd58f` |
-| `20261002T214915-661800` | 2026-10-02 16:49:15 | Restart Malawi estimate and gated download with indexed raw-position person batches (`estimate --download-if-safe`). | Running: connected to WRDS; fresh estimate started | `./klc logs 20261002T214915-661800` |
+| `20261002T214915-661800` | 2026-10-02 16:49:15 | Restart Malawi estimate and gated download with indexed raw-position person batches (`estimate --download-if-safe`). | Failed: WRDS SSL EOF during unmatched-education check | `./klc logs 20261002T214915-661800` |
+| `20261003T034030-cc5164` | 2026-10-02 22:40:30 | Restart Malawi estimate and gated download with indexed unmatched-education batches (`estimate --download-if-safe`). | Running: connected to WRDS; selecting cohort | `./klc logs 20261003T034030-cc5164` |
 
 The command is `./klc logs JOB_ID` (plural). To check one job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
 
 ## Malawi restart
+
+Latest restart: `20261003T034030-cc5164` at 22:40:30 CDT on October 2.
+The worker is running, connected to WRDS, and selecting the cohort for a fresh
+estimate. The accessibility checks and 20 GB gate remain in place.
+Estimate directory: `results/malawi_estimate_20261003T034031596069Z/`.
+Planned data directory: `data/malawi_20261003T034031596069Z/`.
+
+The previous job (`20261002T214915-661800`) failed with `SSL SYSCALL error:
+EOF detected`; its log was last modified at 21:11:41 CDT on October 2.
+All 24 products had saved counts and pilots (8,809,248 retained bytes), and
+the batched unmatched-position check finished. The connection closed during
+the unmatched-education query, before a full download started. The logs do not
+establish why WRDS closed the connection.
+
+The education query used a null-safe user-ID comparison that produced a costly
+full-table anti-join. Selected education IDs are non-NULL, so equality preserves
+the matching semantics. The check now uses indexed equality in disjoint
+1,000-person batches in both estimation and download. First, middle, and last
+live batches used indexes on both education tables and returned zero unmatched
+rows in 0.62, 0.28, and 0.67 seconds. All 64 tests passed in an isolated KLC
+directory, including the duplicate/NULL regression test. This validates the fix,
+but does not establish completion of the replacement job.
+
+The old script was preserved under `logs/malawi_restart_backup_20261003T034025Z/`.
+Existing failed estimates and the worldwide coverage worker were preserved.
+
+### Earlier afternoon restart
 
 Job `20261002T214915-661800` started at 16:49:15 CDT on October 2 and connected
 to WRDS. It runs a fresh estimate before any download, retaining the accessibility

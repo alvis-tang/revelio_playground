@@ -245,6 +245,8 @@ Each batch queries only the needed positions tables. Pilot candidates receive
 seeded random priorities and are merged into one bounded global sample, so batches
 do not receive equal sampling weight. Batches share each phase's repeatable-read
 snapshot; connection loss fails that phase rather than silently reconnecting.
+Unmatched education checks also use disjoint person batches with indexed equality;
+the selected education cohort contains only non-NULL person IDs.
 Version 1 estimates require a fresh estimate with this workflow.
 
 WRDS is a read-only replica. The initial country scan retrieves only cohort IDs,

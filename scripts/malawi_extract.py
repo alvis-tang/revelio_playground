@@ -352,6 +352,21 @@ def unmatched(db, sources, prefix=''):
         if raw == 'individual_positions_raw' and raw in sources:
             result[raw] = count_batches(db, raw_batches(db, sources, unmatched_rows=True), 'Unmatched positions')
             continue
+        if raw == 'individual_user_education_raw' and raw in sources:
+            # mw_education contains only non-NULL cohort IDs. Equality preserves
+            # its matching semantics and permits indexed lookups on both keys.
+            people = sorted(set(db.info.get('mw_people', [])))
+            size = db.info.get('mw_raw_batch_size', 1000)
+            if size < 1:
+                raise ValueError('raw-batch-size must be positive')
+            sql = (f"SELECT p.* FROM {sources[structured]['source']} p "
+                   "WHERE p.user_id = ANY(CAST(:people AS numeric[])) "
+                   f"AND NOT EXISTS (SELECT 1 FROM {sources[raw]['source']} r "
+                   "WHERE r.user_id=p.user_id AND r.education_number=p.education_number)")
+            batches = ((sql, {'people': people[start:start + size]})
+                       for start in range(0, len(people), size))
+            result[raw] = count_batches(db, batches, 'Unmatched education')
+            continue
         if raw in sources:
             match = ' AND '.join(f'r.{key} IS NOT DISTINCT FROM p.{key}' if key == 'user_id' else f'r.{key}=p.{key}' for key in keys)
             result[raw] = scalar(db, prefix + f"SELECT count(*) FROM {temporary_table} p WHERE NOT EXISTS "
