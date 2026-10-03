@@ -280,3 +280,27 @@ budget including retained estimates, and read back for verification. Failures
 leave an `incomplete` manifest; rerun into a new directory. Check both job status
 and the global manifest before using the data. Empty products have zero rows and
 no Parquet parts. All data, pilots, and identifiers remain ignored by Git.
+
+### Education school/year diagnostic
+
+Run against a completed local or KLC extract, without querying WRDS:
+
+```sh
+python scripts/malawi_education_diagnostic.py \
+  --source /gpfs/kellogg/proj/cxv7409/revelio_playground/data/malawi_TIMESTAMP
+```
+
+The diagnostic saves aggregate CSVs and a summary under
+`results/malawi_education_diagnostic_<timestamp>/`. It reports school by education
+ending year for 2015–2025, with separate record and distinct-person pivots for
+Chancellor College, Mzuzu, LUANAR, and MUST. School names use the school mapping
+with whitespace normalization; historical labels are not reassigned.
+
+The generic University of Malawi bucket is cross-tabulated by structured field,
+degree, and ending year, both for the requested window and all years including
+missing dates. A separate cross-tab preserves original field and degree text.
+Explicit mentions of Polytechnic/MUBAS, Chancellor, and medicine/nursing/KUHeS
+in original education text are counted as review clues, not school assignments.
+The coverage audit separates missing, earlier, and later ending dates. Ending
+dates do not verify graduation, and distinct people are not additive across cells.
+Generated tables contain no person identifiers and remain ignored by Git.
