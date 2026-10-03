@@ -1,4 +1,4 @@
-"""Estimate and extract Malawi-linked Revelio products on KLC, with a storage gate."""
+"""Estimate and extract country-linked Revelio products on KLC, with a storage gate."""
 import argparse
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -17,6 +17,14 @@ from wrds_data import connection
 BUDGET = 20_000_000_000
 RESERVE = 1_000_000
 VERSION = 2
+COUNTRIES = ('Malawi', 'Hong Kong')
+
+
+def country_sql(country):
+    if country not in COUNTRIES:
+        raise ValueError('Unsupported country: ' + str(country))
+    return "'" + country + "'"
+
 SCHEMAS = {
     'individual': 'revelio_individual', 'postings': 'revelio_job_postings',
     'common': 'revelio_common', 'sentiment': 'revelio_sentiment',
@@ -133,19 +141,21 @@ def discover(db):
 
 
 def prepare(db, sources, folder=None, budget_used=0):
-    import pandas as pd
-    from sqlalchemy import text
     required = {'individual_positions', 'individual_user', 'postings_cosmos',
                 'company_mapping', 'school_mapping', 'individual_user_education',
                 'sentiment_individual_reviews', 'workforce_dynamics_geo'}
     missing = required - sources.keys()
     if missing:
         raise ValueError('Cannot define complete selection; missing: ' + ', '.join(sorted(missing)))
+    import pandas as pd
+    from sqlalchemy import text
+    country = db.info.get('country', 'Malawi')
+    literal = country_sql(country)
     s = lambda name: sources[name]['source']
-    print('Selecting Malawi person IDs (one country scan per people source)', flush=True)
-    sql = (f"SELECT user_id::text AS user_id FROM {s('individual_user')} WHERE user_country='Malawi' "
+    print(f'Selecting {country} person IDs (one country scan per people source)', flush=True)
+    sql = (f"SELECT user_id::text AS user_id FROM {s('individual_user')} WHERE user_country={literal} "
            f"AND user_id IS NOT NULL UNION SELECT user_id::text FROM {s('individual_positions')} "
-           "WHERE country='Malawi' AND user_id IS NOT NULL")
+           f"WHERE country={literal} AND user_id IS NOT NULL")
     people = []
     if folder:
         folder.mkdir()
@@ -166,35 +176,37 @@ def prepare(db, sources, folder=None, budget_used=0):
     print(f'Cohort: {len(people):,} people', flush=True)
     # Inline ID array avoids repeatedly scanning the billion-row country sources.
     # Typed numeric keys retain exact IDs and allow use of the WRDS user_id indexes.
-    return selection_prefix(sources)
+    return selection_prefix(sources, country)
 
 
-def selection_prefix(sources):
+def selection_prefix(sources, country='Malawi'):
+    literal = country_sql(country)
     s = lambda name: sources[name]['source']
     return f"""WITH mw_people AS (
         SELECT unnest(CAST(:people AS numeric[])) AS user_id
     ), mw_positions AS (
         SELECT t.* FROM {s('individual_positions')} t
-        WHERE t.user_id = ANY(CAST(:people AS numeric[])) OR (t.user_id IS NULL AND country='Malawi')
+        WHERE t.user_id = ANY(CAST(:people AS numeric[])) OR (t.user_id IS NULL AND country={literal})
     ), mw_postings AS (
-        SELECT * FROM {s('postings_cosmos')} WHERE country='Malawi'
+        SELECT * FROM {s('postings_cosmos')} WHERE country={literal}
     ), mw_education AS (
         SELECT t.* FROM {s('individual_user_education')} t
         WHERE t.user_id = ANY(CAST(:people AS numeric[]))
     ), mw_companies AS (
-        SELECT rcid FROM {s('company_mapping')} WHERE hq_country='Malawi'
+        SELECT rcid FROM {s('company_mapping')} WHERE hq_country={literal}
         UNION SELECT rcid FROM mw_positions UNION SELECT ultimate_parent_rcid FROM mw_positions
         UNION SELECT rcid FROM mw_postings UNION SELECT ultimate_parent_rcid FROM mw_postings
-        UNION SELECT rcid FROM {s('sentiment_individual_reviews')} WHERE country='Malawi'
-        UNION SELECT ultimate_parent_rcid FROM {s('sentiment_individual_reviews')} WHERE country='Malawi'
-        UNION SELECT rcid FROM {s('workforce_dynamics_geo')} WHERE country='Malawi'
+        UNION SELECT rcid FROM {s('sentiment_individual_reviews')} WHERE country={literal}
+        UNION SELECT ultimate_parent_rcid FROM {s('sentiment_individual_reviews')} WHERE country={literal}
+        UNION SELECT rcid FROM {s('workforce_dynamics_geo')} WHERE country={literal}
     ), mw_schools AS (
-        SELECT rsid FROM {s('school_mapping')} WHERE country='Malawi'
+        SELECT rsid FROM {s('school_mapping')} WHERE country={literal}
         UNION SELECT rsid FROM mw_education
     ) """
 
 
-def selection(name):
+def selection(name, country='Malawi'):
+    literal = country_sql(country)
     if name == 'individual_positions':
         return 'FROM mw_positions t'
     if name == 'postings_cosmos':
@@ -219,13 +231,13 @@ def selection(name):
     if name == 'postings_cosmos_raw':
         return 'FROM {source} t WHERE EXISTS (SELECT 1 FROM mw_postings p WHERE p.job_id=t.job_id)'
     if name in ('workforce_dynamics_geo', 'sentiment_individual_reviews'):
-        return "FROM {source} t WHERE country='Malawi'"
+        return "FROM {source} t WHERE country=" + literal
     if name in ('company_mapping', 'sentiment_scores', 'layoffs'):
         return 'FROM {source} t WHERE EXISTS (SELECT 1 FROM mw_companies c WHERE c.rcid=t.rcid)'
     if name == 'school_mapping':
         return 'FROM {source} t WHERE EXISTS (SELECT 1 FROM mw_schools c WHERE c.rsid=t.rsid)'
     if name == 'regions':
-        return "FROM {source} t WHERE country='Malawi'"
+        return "FROM {source} t WHERE country=" + literal
     return 'FROM {source} t'
 
 
@@ -256,7 +268,7 @@ def arrow_schema(source):
     return pa.schema(fields)
 
 
-def query(name, source, prefix=''):
+def query(name, source, prefix='', country='Malawi'):
     fields = []
     for column in source['columns']:
         field = 't."' + column['column_name'].replace('"', '""') + '"'
@@ -267,11 +279,12 @@ def query(name, source, prefix=''):
                 'corresponding_rcid', 'corresponding_rsid'):
             field += '::text AS "' + column['column_name'] + '"'
         fields.append(field)
-    return prefix + 'SELECT ' + ', '.join(fields) + ' ' + selection(name).format(source=source['source'])
+    return prefix + 'SELECT ' + ', '.join(fields) + ' ' + selection(name, country).format(source=source['source'])
 
 
 def raw_batches(db, sources, unmatched_rows=False):
-    """Disjoint indexed person batches, followed by Malawi's NULL-person rows."""
+    """Disjoint indexed person batches, followed by the country's NULL-person rows."""
+    literal = country_sql(db.info.get('country', 'Malawi'))
     size = db.info.get('mw_raw_batch_size', 1000)
     if size < 1:
         raise ValueError('raw-batch-size must be positive')
@@ -292,7 +305,7 @@ def raw_batches(db, sources, unmatched_rows=False):
                    'WHERE p.user_id=t.user_id AND p.position_id=t.position_id)')
         yield sql, params
     if unmatched_rows:
-        sql = (f"SELECT p.* FROM {positions} p WHERE p.user_id IS NULL AND p.country='Malawi' "
+        sql = (f"SELECT p.* FROM {positions} p WHERE p.user_id IS NULL AND p.country={literal} "
                f'AND NOT EXISTS (SELECT 1 FROM {raw} r '
                'WHERE r.user_id IS NULL AND r.position_id=p.position_id)')
     else:
@@ -300,7 +313,7 @@ def raw_batches(db, sources, unmatched_rows=False):
         fields = base[:base.index(' FROM ')]
         sql = (fields + f' FROM {raw} t WHERE t.user_id IS NULL '
                f'AND EXISTS (SELECT 1 FROM {positions} p '
-               "WHERE p.user_id IS NULL AND p.country='Malawi' AND p.position_id=t.position_id)")
+               f"WHERE p.user_id IS NULL AND p.country={literal} AND p.position_id=t.position_id)")
     yield sql, {}
 
 
@@ -376,8 +389,10 @@ def unmatched(db, sources, prefix=''):
 
 def estimate(db, root, output, pilot_rows, raw_batch_size=1000):
     db.info['mw_raw_batch_size'] = raw_batch_size
-    report = dict(raw_batch_size=raw_batch_size, version=VERSION, status='incomplete', started_at_utc=now(), country='Malawi',
-        budget_bytes=BUDGET, tables={}, unavailable=[], cohort='Residence or any historical Malawi work; full histories.',
+    country = db.info.get('country', 'Malawi')
+    country_sql(country)
+    report = dict(raw_batch_size=raw_batch_size, version=VERSION, status='incomplete', started_at_utc=now(), country=country,
+        budget_bytes=BUDGET, tables={}, unavailable=[], cohort=f'Residence or any historical {country} work; full histories.',
         sampling='Seeded random priority over selected rows; four independently encoded pilot blocks.',
         margin=0.3, context_tables=['layoffs', 'sentiment_scores'], root=str(root))
     output.mkdir(parents=True, exist_ok=False)
@@ -393,7 +408,7 @@ def estimate(db, root, output, pilot_rows, raw_batch_size=1000):
         sources = dict(sources)
         sources['people_cohort'] = dict(source='mw_people', columns=[dict(column_name='user_id', data_type='numeric')])
         for name, source in sources.items():
-            sql = query(name, source, prefix)
+            sql = query(name, source, prefix, country)
             print('Counting ' + name, flush=True)
             rows, frame = estimate_selection(db, name, sources, sql, pilot_rows)
             print(f'{name}: {rows:,} rows; pilot complete', flush=True)
@@ -433,6 +448,11 @@ def estimate(db, root, output, pilot_rows, raw_batch_size=1000):
 def download(db, report, estimate_dir, output, chunksize):
     import pandas as pd
     gate(report)
+    country = report.get('country', 'Malawi')
+    country_sql(country)
+    if db.info.get('country', country) != country:
+        raise ValueError('Estimate country differs from requested country.')
+    db.info['country'] = country
     db.info['mw_raw_batch_size'] = report.get('raw_batch_size', 1000)
     if shutil.disk_usage(output.parent).free < report['planning_total_bytes'] + RESERVE:
         raise ValueError('Insufficient KLC free storage for the planned extract.')
@@ -446,7 +466,7 @@ def download(db, report, estimate_dir, output, chunksize):
         raise ValueError('People cohort changed; run a new estimate.')
     output.mkdir(exist_ok=False)
     manifest = dict(status='incomplete', started_at_utc=now(), estimate=str(estimate_dir),
-                    tables={}, budget_bytes=BUDGET, actual_bytes=0,
+                    tables={}, budget_bytes=BUDGET, actual_bytes=0, country=country,
                     raw_batch_size=db.info['mw_raw_batch_size'])
     path = output / 'manifest.json'
     save(path, manifest)
@@ -503,6 +523,7 @@ def main(argv=None):
     pa.set_io_thread_count(1)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['estimate', 'download'])
+    parser.add_argument('--country', choices=COUNTRIES, default='Malawi')
     parser.add_argument('--estimate', type=Path, help='Completed estimate directory for download')
     parser.add_argument('--pilot-rows', type=int, default=2000)
     parser.add_argument('--raw-batch-size', type=int, default=1000, help='People per raw-position query; download uses saved estimate value')
@@ -516,13 +537,15 @@ def main(argv=None):
     if not os.environ.get('KLC_ROOT') or not str(root).startswith(('/kellogg/proj/', '/gpfs/kellogg/proj/')):
         parser.error('Run through the KLC job toolkit; data must remain on KLC project storage')
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    output = root / 'data' / ('malawi_' + stamp)
+    slug = args.country.lower().replace(' ', '_')
+    output = root / 'data' / (slug + '_' + stamp)
     output.parent.mkdir(exist_ok=True)
-    estimate_dir = args.estimate or root / 'results' / ('malawi_estimate_' + stamp)
+    estimate_dir = args.estimate or root / 'results' / (slug + '_estimate_' + stamp)
     print(f'Estimate directory: {estimate_dir}; data directory: {output}', flush=True)
     with connection() as conn:
         if args.command == 'estimate':
             with session(conn, args.timeout) as db:
+                db.info['country'] = args.country
                 report = estimate(db, root, estimate_dir, args.pilot_rows, args.raw_batch_size)
             if not args.download_if_safe:
                 return
@@ -532,6 +555,7 @@ def main(argv=None):
             report = json.loads((estimate_dir / 'estimate.json').read_text())
         gate(report)
         with session(conn, args.timeout) as db:
+            db.info['country'] = args.country
             download(db, report, estimate_dir, output, args.chunksize)
 
 
@@ -539,5 +563,5 @@ if __name__ == '__main__':
     try:
         main()
     except Exception as exc:
-        print(f'Malawi workflow stopped: {exc}', file=sys.stderr, flush=True)
+        print(f'Country workflow stopped: {exc}', file=sys.stderr, flush=True)
         sys.exit(1)

@@ -47,6 +47,7 @@ class GateTests(unittest.TestCase):
 
 @unittest.skipIf(duckdb is None, 'Install pandas, pyarrow, and duckdb for integration tests')
 class LinkedDataTests(unittest.TestCase):
+    country = 'Malawi'
     def setUp(self):
         self.db = duckdb.connect()
         self.db.execute('CREATE SCHEMA fixture')
@@ -73,6 +74,7 @@ class LinkedDataTests(unittest.TestCase):
         for name, (columns, records) in fixtures.items():
             self.db.execute(f'CREATE TABLE fixture.{name} ({columns})')
             if records:
+                records = [tuple(self.country if value == 'Malawi' else value for value in row) for row in records]
                 self.db.executemany(f"INSERT INTO fixture.{name} VALUES ({','.join('?' for _ in records[0])})", records)
             self.sources[name] = dict(source='fixture.' + name, columns=[dict(column_name=x.strip().split()[0], data_type={'BIGINT': 'bigint', 'INTEGER': 'integer', 'VARCHAR': 'character varying'}[x.strip().split()[1]]) for x in columns.split(',')])
         outer = self
@@ -97,13 +99,14 @@ class LinkedDataTests(unittest.TestCase):
                 sql = str(sql).replace('numeric[]', 'DECIMAL(38,0)[]').replace(':people', '$people')
                 return Result(outer.db.execute(sql, {'people': (params or {}).get('people', self.info.get('mw_people', []))} if '$people' in sql else None))
         self.adapter = Adapter()
+        self.adapter.info['country'] = self.country
         self.prefix = m.prepare(self.adapter, self.sources).replace('numeric[]', 'DECIMAL(38,0)[]').replace(':people', '$people')
 
     def tearDown(self):
         self.db.close()
 
     def rows(self, name):
-        sql = m.query(name, self.sources[name], self.prefix)
+        sql = m.query(name, self.sources[name], self.prefix, self.country)
         return self.db.execute(sql, {'people': self.adapter.info['mw_people']}).fetchall()
 
     def test_cohort_union_and_full_history(self):
@@ -267,12 +270,12 @@ class LinkedDataTests(unittest.TestCase):
         pd.DataFrame({'user_id': ['1', '2']}).to_parquet(cohort / 'part.parquet')
         tables = {}
         for name in ('individual_positions', 'individual_positions_raw'):
-            tables[name] = dict(sql=m.query(name, self.sources[name], self.prefix),
+            tables[name] = dict(sql=m.query(name, self.sources[name], self.prefix, self.country),
                                 rows=len(self.rows(name)), source=self.sources[name]['source'])
         if changed:
             tables['individual_positions']['rows'] += 1
         report = dict(raw_batch_size=1, version=m.VERSION, status='complete', unavailable=[], planning_total_bytes=10000,
-                      sources=self.sources, tables=tables)
+                      sources=self.sources, tables=tables, country=self.country)
         output = Path(folder) / 'data'
         with patch.object(m, 'discover', return_value=(self.sources, [])):
             m.download(self.adapter, report, estimate_dir, output, 2)
@@ -376,6 +379,28 @@ class LinkedDataTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'storage'):
                     m.write_part(frame, path, 0)
             self.assertFalse(path.exists())
+
+
+class HongKongLinkedDataTests(LinkedDataTests):
+    country = 'Hong Kong'
+
+    def test_all_geographic_filters_use_hong_kong(self):
+        self.assertNotIn("'Malawi'", self.prefix)
+        for name in ('regions', 'workforce_dynamics_geo', 'sentiment_individual_reviews'):
+            self.assertIn("country='Hong Kong'", m.selection(name, self.country))
+        for sql, _ in m.raw_batches(self.adapter, self.sources):
+            self.assertNotIn("'Malawi'", sql)
+        self.assertIn("p.country='Hong Kong'", list(m.raw_batches(self.adapter, self.sources))[-1][0])
+
+    def test_wrong_country_estimate_rejected_before_download(self):
+        report = dict(status='complete', version=m.VERSION, unavailable=[],
+                      planning_total_bytes=1000, country='Malawi')
+        with self.assertRaisesRegex(ValueError, 'country differs'):
+            m.download(self.adapter, report, Path('/unused'), Path('/unused'), 2)
+
+    def test_unsupported_country_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'Unsupported country'):
+            m.selection_prefix(self.sources, "Hong Kong' OR true --")
 
 
 if __name__ == '__main__':

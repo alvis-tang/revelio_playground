@@ -304,3 +304,21 @@ in original education text are counted as review clues, not school assignments.
 The coverage audit separates missing, earlier, and later ending dates. Ending
 dates do not verify graduation, and distinct people are not additive across cells.
 Generated tables contain no person identifiers and remain ignored by Git.
+
+## Hong Kong download with the same 20 GB gate
+
+Use the country option on the same extraction workflow:
+
+```sh
+./klc run python scripts/malawi_extract.py estimate --country 'Hong Kong' --download-if-safe
+```
+
+Synchronize the updated script before launch. Hong Kong uses the same current
+products, full linked-person histories, indexed raw-position batches, access
+checks, and 20 GB storage gate described above for Malawi. Country filters use
+`Hong Kong`; Malawi remains the default. No date restriction or sampling fallback
+applies. Estimates are saved under `results/hong_kong_estimate_<timestamp>/`,
+and completed downloads under `data/hong_kong_<timestamp>/`, on KLC.
+If the estimate exceeds the cap or a product is unavailable, the job stops.
+To download from a completed estimate, include `--country 'Hong Kong'` with
+`download --estimate PATH`. A mismatched estimate country is rejected.

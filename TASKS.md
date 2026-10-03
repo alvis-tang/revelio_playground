@@ -1,6 +1,7 @@
 # KLC tasks
 
-Statuses last checked on October 2, 2026 (America/Chicago), using the remote status command over SSH.
+Hong Kong statuses last checked on October 3, 2026 (America/Chicago), using the
+remote status command over SSH. Earlier rows retain their October 2 snapshots.
 Launch dates below use America/Chicago (CDT, UTC−05:00), converted from the UTC
 timestamp in each KLC job ID. Statuses are a snapshot; use the commands below
 to check current progress.
@@ -15,9 +16,37 @@ to check current progress.
 | `20261002T153034-8dd58f` | 2026-10-02 10:30:34 | Restart Malawi storage estimate and gated download with TCP keepalives and revised raw-position joins (`estimate --download-if-safe`). | Failed: WRDS SSL EOF during raw-position count | `./klc logs 20261002T153034-8dd58f` |
 | `20261002T214915-661800` | 2026-10-02 16:49:15 | Restart Malawi estimate and gated download with indexed raw-position person batches (`estimate --download-if-safe`). | Failed: WRDS SSL EOF during unmatched-education check | `./klc logs 20261002T214915-661800` |
 | `20261003T034030-cc5164` | 2026-10-02 22:40:30 | Restart Malawi estimate and gated download with indexed unmatched-education batches (`estimate --download-if-safe`). | Running: connected to WRDS; selecting cohort | `./klc logs 20261003T034030-cc5164` |
+| `20261003T235606-6f880b` | 2026-10-03 18:56:06 | First Hong Kong estimate-and-download launch from an isolated code copy. | Failed before WRDS connection: isolated copy lacked KLC settings link | `./klc logs 20261003T235606-6f880b` |
+| `20261003T235630-408292` | 2026-10-03 18:56:30 | Estimate all Hong Kong-linked products, then download if access checks and the 20 GB gate pass. | Running: connected to WRDS; selecting Hong Kong cohort | `./klc logs 20261003T235630-408292` |
 
 The command is `./klc logs JOB_ID` (plural). To check one job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
+
+## Hong Kong download
+
+Job `20261003T235630-408292` is running in a detached tmux session on KLC.
+It connected to WRDS and started selecting people with Hong Kong residence or
+any historical Hong Kong position. Their full histories and the same current
+products as Malawi are selected, with no date restriction. Access checks and
+the 20 GB planning/writing cap apply before and during download.
+
+Estimate directory: `results/hong_kong_estimate_20261003T235631322838Z/`.
+Planned data directory: `data/hong_kong_20261003T235631322838Z/`.
+
+The code was uploaded to `logs/hong_kong_code_20261003/` to preserve existing
+remote edits and workers. All 89 tests passed there, including Hong Kong and
+Malawi linked-data integration checks. The isolated copy uses a link to the
+existing `.klc` settings; the first launch failed before connecting because
+that link was missing. No extraction began in that failed attempt.
+
+Launch command:
+
+```sh
+./klc run python logs/hong_kong_code_20261003/scripts/malawi_extract.py \
+  estimate --country 'Hong Kong' --download-if-safe
+```
+
+Check job status and the completed data manifest before using the extract.
 
 ## Malawi restart
 
