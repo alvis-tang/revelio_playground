@@ -96,11 +96,14 @@ class LinkedDataTests(unittest.TestCase):
             def execution_options(self, **kwargs):
                 return self
             def execute(self, sql, params=None):
-                sql = str(sql).replace('numeric[]', 'DECIMAL(38,0)[]').replace(':people', '$people')
-                return Result(outer.db.execute(sql, {'people': (params or {}).get('people', self.info.get('mw_people', []))} if '$people' in sql else None))
+                sql = str(sql).replace('numeric[]', 'DECIMAL(38,0)[]').replace(':people', '$people').replace(':jobs', '$jobs')
+                values = {key: (params or {}).get(key, self.info.get('mw_people' if key == 'people' else 'posting_ids', []))
+                          for key in ('people', 'jobs') if '$' + key in sql}
+                return Result(outer.db.execute(sql, values or None))
         self.adapter = Adapter()
         self.adapter.info['country'] = self.country
-        self.prefix = m.prepare(self.adapter, self.sources).replace('numeric[]', 'DECIMAL(38,0)[]').replace(':people', '$people')
+        m.prepare_postings(self.adapter, self.sources)
+        self.prefix = m.prepare(self.adapter, self.sources).replace('numeric[]', 'DECIMAL(38,0)[]').replace(':people', '$people').replace(':jobs', '$jobs')
 
     def tearDown(self):
         self.db.close()
@@ -248,7 +251,7 @@ class LinkedDataTests(unittest.TestCase):
     def test_estimate_manifest_pilots_and_gate(self):
         import json
         def read_sql(sql, db, params=None, **kwargs):
-            sql = str(sql).replace('numeric[]', 'DECIMAL(38,0)[]').replace(':people', '$people')
+            sql = str(sql).replace('numeric[]', 'DECIMAL(38,0)[]').replace(':people', '$people').replace(':jobs', '$jobs')
             return self.db.execute(sql, params).fetchdf()
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder) / 'estimate'

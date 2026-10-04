@@ -88,7 +88,9 @@ def storage_projection(rows, block_sizes, block_rows, retained):
                 retained_pilot_bytes=retained)
 
 
-def gate(report):
+def gate(report, resumable=False):
+    if report.get('resumable') and not resumable:
+        raise ValueError('Use --resumable to download this estimate.')
     if report.get('status') != 'complete' or report.get('version') != VERSION:
         raise ValueError('A completed compatible estimate is required.')
     if report.get('unavailable'):
@@ -320,8 +322,61 @@ def raw_batches(db, sources, unmatched_rows=False):
 def table_batches(db, name, sources, sql):
     if name == 'individual_positions_raw':
         yield from raw_batches(db, sources)
+    elif name == 'postings_cosmos_raw':
+        yield from posting_batches(db, sources)
     else:
         yield sql, {'people': db.info['mw_people']}
+
+
+def prepare_postings(db, sources, folder=None, budget_used=0):
+    """Collect exact unique country posting IDs without downloading descriptions."""
+    import pandas as pd
+    from sqlalchemy import text
+    literal = country_sql(db.info.get('country', 'Malawi'))
+    sql = (f"SELECT DISTINCT job_id::text AS job_id FROM {sources['postings_cosmos']['source']} "
+           f"WHERE country={literal} AND job_id IS NOT NULL")
+    if folder:
+        folder.mkdir()
+    jobs = []
+    with db.execution_options(stream_results=True).execute(text(sql)) as result:
+        part = 0
+        while True:
+            rows = result.fetchmany(5000)
+            if not rows:
+                break
+            ids = [row[0] for row in rows]
+            jobs.extend(ids)
+            if folder:
+                budget_used += write_part(pd.DataFrame({'job_id': ids}),
+                    folder / f'part-{part:06d}.parquet', budget_used)
+            part += 1
+    db.execution_options(stream_results=False)
+    db.info['posting_ids'] = sorted(jobs)
+    print(f"Posting cohort: {len(jobs):,} unique job IDs", flush=True)
+
+
+def posting_batches(db, sources, unmatched_rows=False):
+    """Disjoint exact IDs preserve raw duplicates without multiplying matches."""
+    size = db.info.get('posting_batch_size', 1000)
+    if size < 1:
+        raise ValueError('posting-batch-size must be positive')
+    jobs = db.info['posting_ids']
+    raw = sources['postings_cosmos_raw']['source']
+    structured = sources['postings_cosmos']['source']
+    literal = country_sql(db.info.get('country', 'Malawi'))
+    fields = query('postings_cosmos_raw', sources['postings_cosmos_raw']).split(' FROM ', 1)[0]
+    for start in range(0, len(jobs), size):
+        if unmatched_rows:
+            sql = (f"SELECT p.* FROM {structured} p WHERE p.country={literal} "
+                   "AND p.job_id = ANY(CAST(:jobs AS bigint[])) "
+                   f"AND NOT EXISTS (SELECT 1 FROM {raw} r WHERE r.job_id=p.job_id)")
+        else:
+            sql = fields + f' FROM {raw} t WHERE t.job_id = ANY(CAST(:jobs AS numeric[]))'
+        yield sql, {'jobs': jobs[start:start + size]}
+    if unmatched_rows:
+        yield f"SELECT p.* FROM {structured} p WHERE p.country={literal} AND p.job_id IS NULL", {}
+    elif not jobs:
+        yield fields + f' FROM {raw} t WHERE false', {}
 
 
 def count_batches(db, batches, label):
@@ -365,6 +420,9 @@ def unmatched(db, sources, prefix=''):
         if raw == 'individual_positions_raw' and raw in sources:
             result[raw] = count_batches(db, raw_batches(db, sources, unmatched_rows=True), 'Unmatched positions')
             continue
+        if raw == 'postings_cosmos_raw' and raw in sources:
+            result[raw] = count_batches(db, posting_batches(db, sources, True), 'Unmatched postings')
+            continue
         if raw == 'individual_user_education_raw' and raw in sources:
             # mw_education contains only non-NULL cohort IDs. Equality preserves
             # its matching semantics and permits indexed lookups on both keys.
@@ -387,11 +445,12 @@ def unmatched(db, sources, prefix=''):
     return result
 
 
-def estimate(db, root, output, pilot_rows, raw_batch_size=1000):
+def estimate(db, root, output, pilot_rows, raw_batch_size=1000, posting_batch_size=1000):
     db.info['mw_raw_batch_size'] = raw_batch_size
+    db.info['posting_batch_size'] = posting_batch_size
     country = db.info.get('country', 'Malawi')
     country_sql(country)
-    report = dict(raw_batch_size=raw_batch_size, version=VERSION, status='incomplete', started_at_utc=now(), country=country,
+    report = dict(raw_batch_size=raw_batch_size, posting_batch_size=posting_batch_size, version=VERSION, status='incomplete', started_at_utc=now(), country=country,
         budget_bytes=BUDGET, tables={}, unavailable=[], cohort=f'Residence or any historical {country} work; full histories.',
         sampling='Seeded random priority over selected rows; four independently encoded pilot blocks.',
         margin=0.3, context_tables=['layoffs', 'sentiment_scores'], root=str(root))
@@ -405,6 +464,7 @@ def estimate(db, root, output, pilot_rows, raw_batch_size=1000):
         for source in sources.values():
             arrow_schema(source)
         prefix = prepare(db, sources, output / 'cohort', footprint(output))
+        prepare_postings(db, sources, output / 'posting_cohort', footprint(output))
         sources = dict(sources)
         sources['people_cohort'] = dict(source='mw_people', columns=[dict(column_name='user_id', data_type='numeric')])
         for name, source in sources.items():
@@ -454,12 +514,14 @@ def download(db, report, estimate_dir, output, chunksize):
         raise ValueError('Estimate country differs from requested country.')
     db.info['country'] = country
     db.info['mw_raw_batch_size'] = report.get('raw_batch_size', 1000)
+    db.info['posting_batch_size'] = report.get('posting_batch_size', 1000)
     if shutil.disk_usage(output.parent).free < report['planning_total_bytes'] + RESERVE:
         raise ValueError('Insufficient KLC free storage for the planned extract.')
     sources, unavailable = discover(db)
     if unavailable or sources != report['sources']:
         raise ValueError('Source access or schema changed; run a new estimate.')
     prefix = prepare(db, sources)
+    prepare_postings(db, sources)
     import pyarrow.dataset as ds
     retained_ids = ds.dataset(estimate_dir / 'cohort', format='parquet').to_table().column('user_id').to_pylist() if list((estimate_dir / 'cohort').glob('*.parquet')) else []
     if set(retained_ids) != set(db.info['mw_people']):
@@ -527,15 +589,21 @@ def main(argv=None):
     parser.add_argument('--estimate', type=Path, help='Completed estimate directory for download')
     parser.add_argument('--pilot-rows', type=int, default=2000)
     parser.add_argument('--raw-batch-size', type=int, default=1000, help='People per raw-position query; download uses saved estimate value')
+    parser.add_argument('--posting-batch-size', type=int, default=1000)
+    parser.add_argument('--resumable', action='store_true', help='Checkpoint work units; reconnect using separate snapshots')
+    parser.add_argument('--resume', type=Path, help='Resume a run from its estimate directory using saved settings')
     parser.add_argument('--chunksize', type=int, default=5000)
     parser.add_argument('--timeout', type=int, default=21600, help='Per-statement timeout in seconds')
     parser.add_argument('--download-if-safe', action='store_true', help='Download after estimate passes all gates')
     args = parser.parse_args(argv)
-    if args.pilot_rows < 100 or args.chunksize < 1 or args.timeout < 1 or args.raw_batch_size < 1:
+    if args.pilot_rows < 100 or min(args.chunksize, args.timeout, args.raw_batch_size, args.posting_batch_size) < 1:
         parser.error('pilot-rows >= 100, chunksize >= 1 and timeout >= 1 and raw-batch-size >= 1 required')
     root = Path(os.environ.get('KLC_ROOT', str(ROOT))).resolve()
     if not os.environ.get('KLC_ROOT') or not str(root).startswith(('/kellogg/proj/', '/gpfs/kellogg/proj/')):
         parser.error('Run through the KLC job toolkit; data must remain on KLC project storage')
+    if args.resumable or args.resume:
+        from country_extract_resumable import run
+        return run(args, root)
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
     slug = args.country.lower().replace(' ', '_')
     output = root / 'data' / (slug + '_' + stamp)
@@ -546,7 +614,7 @@ def main(argv=None):
         if args.command == 'estimate':
             with session(conn, args.timeout) as db:
                 db.info['country'] = args.country
-                report = estimate(db, root, estimate_dir, args.pilot_rows, args.raw_batch_size)
+                report = estimate(db, root, estimate_dir, args.pilot_rows, args.raw_batch_size, args.posting_batch_size)
             if not args.download_if_safe:
                 return
         else:

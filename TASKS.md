@@ -1,7 +1,7 @@
 # KLC tasks
 
-Hong Kong statuses last checked on October 3, 2026 (America/Chicago), using the
-remote status command over SSH. Earlier rows retain their October 2 snapshots.
+Hong Kong statuses last checked on October 4, 2026 (America/Chicago), using the
+remote status command over SSH. Other jobs retain their previously recorded snapshots.
 Launch dates below use America/Chicago (CDT, UTC−05:00), converted from the UTC
 timestamp in each KLC job ID. Statuses are a snapshot; use the commands below
 to check current progress.
@@ -17,15 +17,55 @@ to check current progress.
 | `20261002T214915-661800` | 2026-10-02 16:49:15 | Restart Malawi estimate and gated download with indexed raw-position person batches (`estimate --download-if-safe`). | Failed: WRDS SSL EOF during unmatched-education check | `./klc logs 20261002T214915-661800` |
 | `20261003T034030-cc5164` | 2026-10-02 22:40:30 | Restart Malawi estimate and gated download with indexed unmatched-education batches (`estimate --download-if-safe`). | Running: connected to WRDS; selecting cohort | `./klc logs 20261003T034030-cc5164` |
 | `20261003T235606-6f880b` | 2026-10-03 18:56:06 | First Hong Kong estimate-and-download launch from an isolated code copy. | Failed before WRDS connection: isolated copy lacked KLC settings link | `./klc logs 20261003T235606-6f880b` |
-| `20261003T235630-408292` | 2026-10-03 18:56:30 | Estimate all Hong Kong-linked products, then download if access checks and the 20 GB gate pass. | Running: connected to WRDS; selecting Hong Kong cohort | `./klc logs 20261003T235630-408292` |
+| `20261003T235630-408292` | 2026-10-03 18:56:30 | Estimate all Hong Kong-linked products, then download if access checks and the 20 GB gate pass. | Failed: WRDS SSL EOF while counting raw job descriptions; full download never started | `./klc logs 20261003T235630-408292` |
+| `20261004T140024-56dfbb` | 2026-10-04 09:00:24 | Fresh Hong Kong estimate and gated download with 1,000-ID raw posting batches, checkpoints, and transport retries. | Running: WRDS connected; selecting Hong Kong people | `./klc logs 20261004T140024-56dfbb` |
 
 The command is `./klc logs JOB_ID` (plural). To check one job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
 
-## Hong Kong download
+## Hong Kong resumable replacement
 
-Job `20261003T235630-408292` is running in a detached tmux session on KLC.
-It connected to WRDS and started selecting people with Hong Kong residence or
+Replacement job: `20261004T140024-56dfbb`, launched at 09:00:24 CDT on October 4.
+The worker is running, connected to WRDS, and selecting Hong Kong person IDs.
+The full download has not yet been verified complete.
+
+Estimate/checkpoint directory:
+`results/hong_kong_estimate_20261004T140024976790Z/`.
+Planned data directory: `data/hong_kong_20261004T140024976790Z/`.
+
+The isolated code is under `logs/hong_kong_resume_code_20261004/`, with a link
+to existing KLC settings. Existing remote edits, failed outputs, and other workers
+were preserved. All 126 tests passed on KLC, including whole-run extraction,
+resume, disconnect retries, duplicate preservation, partial-file cleanup,
+cohort integrity, locking, storage limits, and schema/count mismatch checks.
+
+Read-only checks used first, middle, and last 1,000-ID windows from the previous
+Hong Kong structured-posting pilot. All plans used indexes. Raw-description
+counts took 5.255, 3.908, and 5.174 seconds; unmatched checks took 2.955, 1.478,
+and 1.487 seconds. Each window returned 1,000 descriptions and zero unmatched
+postings. These pilot checks validate bounded query behavior, not full coverage.
+
+```sh
+./klc run python logs/hong_kong_resume_code_20261004/scripts/malawi_extract.py \
+  estimate --country 'Hong Kong' --resumable --posting-batch-size 1000 --download-if-safe
+```
+
+If the worker stops, resume using saved settings and completed work:
+
+```sh
+./klc run python logs/hong_kong_resume_code_20261004/scripts/malawi_extract.py \
+  estimate --resume /gpfs/kellogg/proj/cxv7409/revelio_playground/results/hong_kong_estimate_20261004T140024976790Z
+```
+
+The 20 GB cap and product-access checks remain in place. Each unit uses its own
+read-only snapshot, with frozen cohorts and validated download counts. Check
+both job status and the global download manifest before using the data.
+
+## Earlier Hong Kong attempt
+
+Job `20261003T235630-408292` failed with WRDS SSL EOF while counting raw job
+descriptions after estimates for 11 products were saved. No full data directory
+was created. It had connected to WRDS and selected people with Hong Kong residence or
 any historical Hong Kong position. Their full histories and the same current
 products as Malawi are selected, with no date restriction. Access checks and
 the 20 GB planning/writing cap apply before and during download.

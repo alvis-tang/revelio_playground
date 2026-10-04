@@ -18,7 +18,7 @@ def connect_args():
 
 
 @contextmanager
-def connection():
+def connection(preserve_transport_errors=False):
     import wrds
     settings = json.loads((ROOT / '.klc/config.json').read_text())
     # Never let WRDS fall back to password prompts in background job logs.
@@ -29,7 +29,14 @@ def connection():
         with patch('builtins.input', side_effect=ValueError('WRDS authentication failed; run credentials and doctor interactively.')):
             conn = wrds.Connection(wrds_username=settings['wrds_username'],
                                    wrds_connect_args=connect_args())
-    except Exception:
+    except Exception as exc:
+        if preserve_transport_errors:
+            from sqlalchemy.exc import OperationalError
+            from psycopg2 import OperationalError as DriverOperationalError
+            if isinstance(exc, (OperationalError, DriverOperationalError)):
+                code = getattr(getattr(exc, 'orig', exc), 'pgcode', None)
+                if code is None or code.startswith('08'):
+                    raise
         raise ValueError('WRDS connection failed. Check credentials, network, and Duo using ./klc doctor.') from None
     try:
         yield conn

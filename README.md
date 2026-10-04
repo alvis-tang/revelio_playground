@@ -322,3 +322,58 @@ and completed downloads under `data/hong_kong_<timestamp>/`, on KLC.
 If the estimate exceeds the cap or a product is unavailable, the job stops.
 To download from a completed estimate, include `--country 'Hong Kong'` with
 `download --estimate PATH`. A mismatched estimate country is rejected.
+
+### Resumable extraction and raw job-description batches
+
+Raw job descriptions now use disjoint batches of 1,000 unique country posting
+IDs for counts, pilots, downloads, and unmatched-record checks. Change this with
+`--posting-batch-size` during estimation. Full `description` text is included;
+raw duplicates are preserved and structured duplicates do not multiply matches.
+NULL raw IDs do not match; structured NULL posting IDs count as unmatched.
+
+For recovery across disconnected work units, launch:
+
+```sh
+./klc run python scripts/malawi_extract.py estimate \
+  --country 'Hong Kong' --resumable --posting-batch-size 1000 --download-if-safe
+```
+
+Synchronize both extraction scripts and the updated `tools/wrds_data.py` first,
+or use the isolated deployed code path recorded in `TASKS.md`.
+The run freezes successfully collected people and posting cohorts on KLC. An
+interrupted cohort collection restarts that collection. SHA-256 checks protect
+retained cohort files. A versioned `checkpoint.json` records saved settings,
+schemas, completed units, counts, pilot state, and the data directory. A file
+lock prevents concurrent workers. The old incomplete Hong Kong estimate cannot
+be resumed because it predates this checkpoint format.
+
+Transport failures retry the unfinished unit twice on fresh connections, with
+two-second delays. Raw employment and raw posting products recover by batch;
+other products recover by whole table. Unmatched employment, education, and
+posting checks recover by batch. Completed units survive restarts. Partial files
+from an uncommitted unit are removed before replay, preventing duplicate output.
+Statement timeouts, missing permissions, schema changes, count mismatches, and
+storage failures stop with the checkpoint intact.
+
+Resume using the same deployed code and the estimate directory:
+
+```sh
+./klc run python scripts/malawi_extract.py estimate --resume \
+  /gpfs/kellogg/proj/cxv7409/revelio_playground/results/hong_kong_estimate_TIMESTAMP
+```
+
+Resume uses saved country, batch sizes, timeout, and automatic-download setting.
+If estimation was deliberately run without automatic download, start it with
+`download --resumable --estimate PATH` after its estimate completes.
+Resumable estimates must be downloaded through the resumable workflow.
+
+Each work unit uses a read-only repeatable-read transaction; different units can
+observe different source snapshots, including after reconnects. Frozen IDs and
+matching counts do not guarantee identical source contents across snapshots.
+Omitting `--resumable` retains the original per-phase snapshot behavior.
+The access checks, full coverage, and 20 GB planning/writing cap still apply.
+
+Resumable downloads store each table's parts under `TABLE/unit-NNNNNN/`. Read
+Parquet recursively, and check the global `manifest.json` for `complete` before
+using the extract. That status requires every product and unmatched-record check
+to finish; a running worker does not establish download completion.
