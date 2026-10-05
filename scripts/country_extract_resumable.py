@@ -94,6 +94,38 @@ def load_ids(folder, column):
     return sorted(ids)
 
 
+def effective_budget(state):
+    return state['settings'].get('budget_bytes', state.get('report', {}).get('budget_bytes', m.BUDGET))
+
+
+def apply_budget(state, folder, budget_gb=None):
+    """Checkpoint is authoritative if interrupted between metadata file updates."""
+    old = effective_budget(state)
+    budget = old if budget_gb is None else budget_gb * 1_000_000_000
+    if budget_gb is not None and budget_gb < 1:
+        raise ValueError('budget-gb must be a positive whole number')
+    if budget != old:
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+        backup = folder / ('budget_backup_' + stamp)
+        backup.mkdir()
+        for name in ('checkpoint.json', 'estimate.json'):
+            source = folder / name
+            if source.exists():
+                shutil.copy2(source, backup / name)
+        state.setdefault('budget_changes', []).append(dict(old_budget_bytes=old, new_budget_bytes=budget,
+                                                          changed_at_utc=m.now(), backup=str(backup)))
+    state['settings']['budget_bytes'] = budget
+    state['report']['budget_bytes'] = budget
+    if state.get('manifest'):
+        state['manifest']['budget_bytes'] = budget
+    m.save(folder / 'checkpoint.json', state)
+    m.save(folder / 'estimate.json', state['report'])
+    if state.get('manifest'):
+        m.save(Path(state['output']) / 'manifest.json', state['manifest'])
+    print(f'Run storage cap: {budget / 1e9:g} GB', flush=True)
+    return budget
+
+
 def cohort(queries, state, folder, kind):
     key, column, info_key = ('cohort', 'user_id', 'mw_people') if kind == 'people' else ('posting_cohort', 'job_id', 'posting_ids')
     target = folder / key
@@ -104,9 +136,9 @@ def cohort(queries, state, folder, kind):
             # Existing collectors create their own destination.
             destination = staging / 'ids'
             if kind == 'people':
-                m.prepare(db, state['sources'], destination, m.footprint(folder))
+                m.prepare(db, state['sources'], destination, m.footprint(folder), budget=effective_budget(state))
             else:
-                m.prepare_postings(db, state['sources'], destination, m.footprint(folder))
+                m.prepare_postings(db, state['sources'], destination, m.footprint(folder), budget=effective_budget(state))
             return destination
         destination = queries.call(collect)
         if target.exists():
@@ -162,10 +194,10 @@ def sample_unit(db, sql, params, source, limit, seed):
     return count, frame, priority
 
 
-def persist_sample(frame, path, source, priority, used):
+def persist_sample(frame, path, source, priority, used, budget=None):
     import pyarrow as pa
     schema = m.arrow_schema(source).append(pa.field(priority, pa.float64()))
-    m.write_part(frame, path, used, schema=schema)
+    m.write_part(frame, path, used, budget=budget, schema=schema)
 
 
 def estimate_tables(queries, state, folder, sources):
@@ -191,7 +223,7 @@ def estimate_tables(queries, state, folder, sources):
             candidate[priority] = pd.to_numeric(candidate[priority])
             candidate = candidate.nsmallest(settings['pilot_rows'], priority).reset_index(drop=True)
             path = table_folder / f'sample-{index:06d}.parquet'
-            persist_sample(candidate, path, source, priority, m.footprint(folder))
+            persist_sample(candidate, path, source, priority, m.footprint(folder), budget=effective_budget(state))
             progress['counts'].append(count)
             progress['sample'] = path.name
             progress['priority'] = priority
@@ -210,7 +242,7 @@ def estimate_tables(queries, state, folder, sources):
         for start in range(0, len(frame), width):
             part = frame.iloc[start:start + width]
             sizes.append(m.write_part(part, table_folder / f'pilot-{start // width:02d}.parquet',
-                                      m.footprint(folder), schema=m.arrow_schema(source)))
+                                      m.footprint(folder), budget=effective_budget(state), schema=m.arrow_schema(source)))
             counts.append(len(part))
         rows = sum(progress['counts'])
         projection = m.storage_projection(rows, sizes, counts, sum(sizes))
@@ -238,7 +270,7 @@ def unmatched_checks(queries, state, folder, phase):
     return result
 
 
-def download_unit(db, sql, params, source, expected, staging, estimate_dir, output, chunksize):
+def download_unit(db, sql, params, source, expected, staging, estimate_dir, output, chunksize, budget=None):
     import pandas as pd
     from sqlalchemy import text
     clean(staging)
@@ -255,7 +287,7 @@ def download_unit(db, sql, params, source, expected, staging, estimate_dir, outp
             frame = pd.DataFrame({name: pd.Series([r[i] for r in records], dtype=object)
                                   for i, name in enumerate(columns)})
             size += m.write_part(frame, staging / f'part-{parts:06d}.parquet',
-                                 m.footprint(estimate_dir) + m.footprint(output), schema=m.arrow_schema(source))
+                                 m.footprint(estimate_dir) + m.footprint(output), budget=budget, schema=m.arrow_schema(source))
             rows += len(frame)
             parts += 1
     if rows != expected:
@@ -268,7 +300,7 @@ def download_tables(queries, state, folder, sources):
     output = Path(state['output'])
     output.mkdir(exist_ok=True)
     manifest = state.setdefault('manifest', dict(status='incomplete', country=state['settings']['country'],
-        started_at_utc=m.now(), estimate=str(folder), tables={}, budget_bytes=m.BUDGET,
+        started_at_utc=m.now(), estimate=str(folder), tables={}, budget_bytes=effective_budget(state),
         snapshots=SNAPSHOTS, resumable=True, raw_batch_size=state['settings']['raw_batch_size'],
         posting_batch_size=state['settings']['posting_batch_size']))
     m.save(output / 'manifest.json', manifest)
@@ -295,7 +327,7 @@ def download_tables(queries, state, folder, sources):
                 continue
             staging = table_folder / '.pending'
             saved = queries.call(lambda db: download_unit(db, sql, params, source, expected[index], staging,
-                                                          folder, output, state['settings']['chunksize']))
+                                                          folder, output, state['settings']['chunksize'], budget=effective_budget(state)))
             staging.replace(table_folder / f'unit-{index:06d}')
             progress['units'].append(saved)
             for key in ('rows', 'parts', 'bytes'):
@@ -313,9 +345,9 @@ def download_tables(queries, state, folder, sources):
     manifest.update(status='complete', finished_at_utc=m.now(),
                     actual_bytes=sum(t['bytes'] for t in manifest['tables'].values()))
     manifest['stored_bytes_including_estimate'] = m.footprint(folder) + m.footprint(output)
-    if manifest['stored_bytes_including_estimate'] + m.RESERVE > m.BUDGET:
+    if manifest['stored_bytes_including_estimate'] + m.RESERVE > effective_budget(state):
         manifest['status'] = 'incomplete'
-        raise ValueError('20 GB storage cap reached.')
+        raise ValueError(f'{effective_budget(state) / 1e9:g} GB storage cap reached.')
     state['status'] = 'complete'
     m.save(folder / 'checkpoint.json', state)
     m.save(output / 'manifest.json', manifest)
@@ -347,12 +379,14 @@ def run(args, root):
         else:
             settings = {key: getattr(args, key) for key in ('country', 'raw_batch_size', 'posting_batch_size',
                         'pilot_rows', 'chunksize', 'timeout', 'download_if_safe')}
+            settings['budget_bytes'] = (getattr(args, 'budget_gb', None) or 20) * 1_000_000_000
             report = dict(status='incomplete', version=m.VERSION, country=args.country, resumable=True,
-                          snapshots=SNAPSHOTS, started_at_utc=m.now(), tables={}, unavailable=[], budget_bytes=m.BUDGET)
+                          snapshots=SNAPSHOTS, started_at_utc=m.now(), tables={}, unavailable=[], budget_bytes=settings['budget_bytes'])
             state = dict(version=VERSION, root=str(root), status='incomplete', settings=settings, cohorts={},
                          estimate_units={}, unmatched_units={}, report=report,
                          output=str(root / 'data' / (args.country.lower().replace(' ', '_') + '_' + stamp)))
             m.save(path, state)
+        apply_budget(state, folder, getattr(args, 'budget_gb', None))
         print(f'Resumable estimate: {folder}; data: {state["output"]}', flush=True)
         state.pop('error_type', None)
         if state.get('manifest'):
@@ -392,7 +426,7 @@ def run(args, root):
                 m.save(folder / 'estimate.json', report)
             if not state['settings']['download_if_safe']:
                 return
-            m.gate(state['report'], resumable=True)
+            m.gate(state['report'], resumable=True, budget=effective_budget(state))
             output = Path(state['output'])
             output.parent.mkdir(exist_ok=True)
             committed_bytes = sum(t['bytes'] for t in state.get('manifest', {}).get('tables', {}).values())

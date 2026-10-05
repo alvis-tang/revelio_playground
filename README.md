@@ -377,3 +377,29 @@ Resumable downloads store each table's parts under `TABLE/unit-NNNNNN/`. Read
 Parquet recursively, and check the global `manifest.json` for `complete` before
 using the extract. That status requires every product and unmatched-record check
 to finish; a running worker does not establish download completion.
+
+### Per-run storage caps
+
+`--budget-gb` accepts a positive whole number of decimal gigabytes (one GB is
+1,000,000,000 bytes). New runs default to 20 GB. Resumes retain their saved cap
+unless explicitly overridden. To resume the completed Hong Kong estimate with
+a 25 GB cap, use the updated isolated deployment:
+
+```sh
+./klc run python logs/hong_kong_cap25_code/scripts/malawi_extract.py \
+  estimate --resume /gpfs/kellogg/proj/cxv7409/revelio_playground/results/hong_kong_estimate_20261004T140024976790Z \
+  --budget-gb 25
+```
+
+The change applies only to that run. Under its lock, the worker backs up the
+previous checkpoint and estimate into `budget_backup_<timestamp>/`, records the
+cap change, and updates `budget_bytes` in checkpoint settings, the estimate,
+and any download manifest. Old checkpoints inherit their report's recorded cap,
+falling back to 20 GB. Later resumes can omit `--budget-gb`; use this updated
+code deployment so every planning and writing check enforces the saved cap.
+
+Completed estimates, cohorts, pilots, and checks are reused. Raising the cap
+does not change the selected products or remove the safety margin. The selected
+cap includes retained artifacts and applies to cohort files, pilots, download
+parts, and final storage checks. Available-space, access, schema, row-count, and
+Parquet checks remain required. Check the global manifest for completion.

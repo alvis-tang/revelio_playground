@@ -105,13 +105,13 @@ class PostingBatchesTests(fixtures.HongKongLinkedDataTests):
             self.estimate(queries, state, folder, products)
             original = r.download_unit
             calls = 0
-            def flaky(*args):
+            def flaky(*args, **kwargs):
                 nonlocal calls
                 calls += 1
                 if calls == 2:
-                    original(*args)
+                    original(*args, **kwargs)
                     raise RuntimeError('connection lost after writing')
-                return original(*args)
+                return original(*args, **kwargs)
             with patch.object(r, 'download_unit', side_effect=flaky), patch.object(r, 'unmatched_checks', return_value={}):
                 with self.assertRaisesRegex(RuntimeError, 'connection lost'):
                     r.download_tables(queries, state, folder, products)
@@ -142,11 +142,85 @@ class PostingBatchesTests(fixtures.HongKongLinkedDataTests):
                 r.run(args, root)
                 self.assertEqual(json.loads((Path(state['output']) / 'manifest.json').read_text())['status'], 'complete')
 
+    def test_25gb_run_passes_cap_to_every_writer_and_resume_skips_estimation(self):
+        import pandas as pd
+        queries = self.fake_queries()
+        original = r.m.write_part
+        budgets = []
+        def write(*args, **kwargs):
+            budgets.append(kwargs.get('budget'))
+            return original(*args, **kwargs)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = SimpleNamespace(command='estimate', resume=None, estimate=None, budget_gb=25, **self.settings())
+            with patch.object(r, 'Queries', return_value=queries), patch.object(r.m, 'discover', return_value=(self.sources, [])), \
+                    patch.object(r.m, 'execute'), patch.object(pd, 'read_sql_query', side_effect=self.read_sql), \
+                    patch.object(r.m, 'write_part', side_effect=write):
+                r.run(args, root)
+                self.assertTrue(budgets)
+                self.assertEqual(set(budgets), {25_000_000_000})
+                args.resume = next((root / 'results').iterdir()); args.budget_gb = None
+                state = json.loads((args.resume / 'checkpoint.json').read_text())
+                self.assertEqual(state['settings']['budget_bytes'], 25_000_000_000)
+                with patch.object(r, 'estimate_tables', side_effect=AssertionError('must not re-estimate')):
+                    r.run(args, root)
+                manifest = json.loads((Path(state['output']) / 'manifest.json').read_text())
+                self.assertEqual(manifest['budget_bytes'], 25_000_000_000)
+
+    def test_completed_estimate_resumes_at_25gb_without_repeating_saved_work(self):
+        import pandas as pd
+        import shutil
+        queries = self.fake_queries()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = SimpleNamespace(command='estimate', resume=None, estimate=None, **self.settings())
+            with patch.object(r, 'Queries', return_value=queries), patch.object(r.m, 'discover', return_value=(self.sources, [])), \
+                    patch.object(r.m, 'execute'), patch.object(pd, 'read_sql_query', side_effect=self.read_sql):
+                r.run(args, root)
+                folder = next((root / 'results').iterdir())
+                state = json.loads((folder / 'checkpoint.json').read_text())
+                shutil.rmtree(state['output'])
+                state.pop('manifest'); state['status'] = 'incomplete'
+                state['report']['planning_total_bytes'] = 21_013_359_306
+                r.m.save(folder / 'checkpoint.json', state)
+                r.m.save(folder / 'estimate.json', state['report'])
+                args.resume = folder; args.budget_gb = 25
+                with patch.object(r, 'estimate_tables', side_effect=AssertionError('must not re-estimate')), \
+                        patch.object(r.m, 'prepare', side_effect=AssertionError('must not recollect people')), \
+                        patch.object(r.m, 'prepare_postings', side_effect=AssertionError('must not recollect postings')):
+                    r.run(args, root)
+                resumed = json.loads((folder / 'checkpoint.json').read_text())
+                self.assertEqual(resumed['status'], 'complete')
+                self.assertEqual(resumed['settings']['budget_bytes'], 25_000_000_000)
+                self.assertEqual(resumed['report']['tables'], state['report']['tables'])
+                self.assertEqual(resumed['unmatched_units']['estimate:postings_cosmos_raw'],
+                                 state['unmatched_units']['estimate:postings_cosmos_raw'])
+
+    def test_actual_part_enforces_selected_budget_above_default(self):
+        import pandas as pd
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'part.parquet'
+            with self.assertRaisesRegex(ValueError, '20 GB'):
+                r.m.write_part(pd.DataFrame({'job_id': ['91']}), path, 21_000_000_000)
+            r.m.write_part(pd.DataFrame({'job_id': ['91']}), path, 21_000_000_000, budget=25_000_000_000)
+            self.assertTrue(path.exists())
+            with self.assertRaisesRegex(ValueError, '25 GB'):
+                r.m.write_part(pd.DataFrame({'job_id': ['91']}), path, 25_000_000_000, budget=25_000_000_000)
+
+    def test_final_cap_enforces_25gb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / 'estimate'; folder.mkdir()
+            state = self.state(tmp); state['settings']['budget_bytes'] = 25_000_000_000
+            with patch.object(r, 'unmatched_checks', return_value={}), patch.object(r.m, 'footprint', return_value=13_000_000_000):
+                with self.assertRaisesRegex(ValueError, '25 GB'):
+                    r.download_tables(self.fake_queries(), state, folder, {})
+            self.assertEqual(state['manifest']['status'], 'incomplete')
+
     def test_frozen_cohort_tamper_rejected(self):
         queries = self.fake_queries()
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            state = dict(sources=self.sources, cohorts={})
+            state = dict(sources=self.sources, cohorts={}, settings=self.settings())
             r.cohort(queries, state, folder, 'postings')
             part = next((folder / 'posting_cohort').glob('*.parquet'))
             part.write_bytes(b'changed')
@@ -168,6 +242,40 @@ class PostingBatchesTests(fixtures.HongKongLinkedDataTests):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_budget_argument_and_saved_estimate_gate(self):
+        import argparse
+        self.assertEqual(r.m.positive_gb('25'), 25)
+        for value in ('0', '-1', '25.5', 'abc'):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                r.m.positive_gb(value)
+        report = dict(version=r.m.VERSION, status='complete', unavailable=[], planning_total_bytes=21_013_359_306)
+        with self.assertRaisesRegex(ValueError, '20 GB'):
+            r.m.gate(report)
+        r.m.gate(report, budget=25_000_000_000)
+        r.m.gate({**report, 'budget_bytes': 25_000_000_000})
+        self.assertEqual(r.m.BUDGET, 20_000_000_000)
+
+    def test_legacy_checkpoint_override_backup_history_and_retention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            state = dict(settings={}, report={'budget_bytes': 20_000_000_000, 'tables': {'raw': {'rows': 1000}}},
+                         estimate_units={'raw': {'counts': [1000]}}, cohorts={'people': {'sha256': 'same'}})
+            r.m.save(folder / 'checkpoint.json', state)
+            r.m.save(folder / 'estimate.json', state['report'])
+            old = json.loads((folder / 'checkpoint.json').read_text())
+            self.assertEqual(r.apply_budget(state, folder, 25), 25_000_000_000)
+            backup = Path(state['budget_changes'][0]['backup'])
+            self.assertEqual(json.loads((backup / 'checkpoint.json').read_text()), old)
+            self.assertEqual(json.loads((backup / 'estimate.json').read_text()), old['report'])
+            self.assertEqual(state['estimate_units'], old['estimate_units'])
+            self.assertEqual(state['cohorts'], old['cohorts'])
+            reloaded = json.loads((folder / 'checkpoint.json').read_text())
+            self.assertEqual(r.apply_budget(reloaded, folder), 25_000_000_000)
+            self.assertEqual(len(reloaded['budget_changes']), 1)
+            self.assertEqual(reloaded['report']['budget_bytes'], 25_000_000_000)
+            self.assertEqual(r.effective_budget({'settings': {}, 'report': {'budget_bytes': 25_000_000_000}}), 25_000_000_000)
+            self.assertEqual(r.effective_budget({'settings': {}}), 20_000_000_000)
+
     def test_lock_rejects_second_worker(self):
         with tempfile.TemporaryDirectory() as tmp:
             with r.locked(Path(tmp)):

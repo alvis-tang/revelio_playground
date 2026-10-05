@@ -61,14 +61,15 @@ def footprint(path):
     return sum(p.stat().st_size for p in Path(path).rglob('*') if p.is_file())
 
 
-def write_part(frame, path, used, budget=BUDGET, schema=None):
+def write_part(frame, path, used, budget=None, schema=None):
     """Encode before writing so a part cannot overshoot the on-disk budget."""
+    budget = BUDGET if budget is None else budget
     import pyarrow.parquet as pq
     buffer = io.BytesIO()
     frame.to_parquet(buffer, index=False, compression='zstd', schema=schema)
     payload = buffer.getvalue()
     if used + len(payload) + RESERVE > budget:
-        raise ValueError('20 GB storage cap reached; extract remains incomplete.')
+        raise ValueError(f'{budget / 1e9:g} GB storage cap reached; extract remains incomplete.')
     if shutil.disk_usage(path.parent).free < len(payload) + RESERVE:
         raise ValueError('Insufficient KLC storage; extract remains incomplete.')
     temporary = path.with_suffix('.tmp')
@@ -88,15 +89,16 @@ def storage_projection(rows, block_sizes, block_rows, retained):
                 retained_pilot_bytes=retained)
 
 
-def gate(report, resumable=False):
+def gate(report, resumable=False, budget=None):
+    budget = report.get('budget_bytes', BUDGET) if budget is None else budget
     if report.get('resumable') and not resumable:
         raise ValueError('Use --resumable to download this estimate.')
     if report.get('status') != 'complete' or report.get('version') != VERSION:
         raise ValueError('A completed compatible estimate is required.')
     if report.get('unavailable'):
         raise ValueError('Missing products: report to the user before any partial download.')
-    if report['planning_total_bytes'] + RESERVE > BUDGET:
-        raise ValueError('Estimate or uncertainty exceeds 20 GB; report before sampling.')
+    if report['planning_total_bytes'] + RESERVE > budget:
+        raise ValueError(f'Estimate or uncertainty exceeds {budget / 1e9:g} GB; report before sampling.')
 
 
 @contextmanager
@@ -142,7 +144,7 @@ def discover(db):
     return result, unavailable
 
 
-def prepare(db, sources, folder=None, budget_used=0):
+def prepare(db, sources, folder=None, budget_used=0, budget=None):
     required = {'individual_positions', 'individual_user', 'postings_cosmos',
                 'company_mapping', 'school_mapping', 'individual_user_education',
                 'sentiment_individual_reviews', 'workforce_dynamics_geo'}
@@ -171,7 +173,7 @@ def prepare(db, sources, folder=None, budget_used=0):
             people.extend(ids)
             if folder:
                 frame = pd.DataFrame({'user_id': ids})
-                budget_used += write_part(frame, folder / f'part-{part:06d}.parquet', budget_used)
+                budget_used += write_part(frame, folder / f'part-{part:06d}.parquet', budget_used, budget=budget)
             part += 1
     db.execution_options(stream_results=False)
     db.info['mw_people'] = people
@@ -328,7 +330,7 @@ def table_batches(db, name, sources, sql):
         yield sql, {'people': db.info['mw_people']}
 
 
-def prepare_postings(db, sources, folder=None, budget_used=0):
+def prepare_postings(db, sources, folder=None, budget_used=0, budget=None):
     """Collect exact unique country posting IDs without downloading descriptions."""
     import pandas as pd
     from sqlalchemy import text
@@ -348,7 +350,7 @@ def prepare_postings(db, sources, folder=None, budget_used=0):
             jobs.extend(ids)
             if folder:
                 budget_used += write_part(pd.DataFrame({'job_id': ids}),
-                    folder / f'part-{part:06d}.parquet', budget_used)
+                    folder / f'part-{part:06d}.parquet', budget_used, budget=budget)
             part += 1
     db.execution_options(stream_results=False)
     db.info['posting_ids'] = sorted(jobs)
@@ -445,13 +447,14 @@ def unmatched(db, sources, prefix=''):
     return result
 
 
-def estimate(db, root, output, pilot_rows, raw_batch_size=1000, posting_batch_size=1000):
+def estimate(db, root, output, pilot_rows, raw_batch_size=1000, posting_batch_size=1000, budget=None):
+    budget = BUDGET if budget is None else budget
     db.info['mw_raw_batch_size'] = raw_batch_size
     db.info['posting_batch_size'] = posting_batch_size
     country = db.info.get('country', 'Malawi')
     country_sql(country)
     report = dict(raw_batch_size=raw_batch_size, posting_batch_size=posting_batch_size, version=VERSION, status='incomplete', started_at_utc=now(), country=country,
-        budget_bytes=BUDGET, tables={}, unavailable=[], cohort=f'Residence or any historical {country} work; full histories.',
+        budget_bytes=budget, tables={}, unavailable=[], cohort=f'Residence or any historical {country} work; full histories.',
         sampling='Seeded random priority over selected rows; four independently encoded pilot blocks.',
         margin=0.3, context_tables=['layoffs', 'sentiment_scores'], root=str(root))
     output.mkdir(parents=True, exist_ok=False)
@@ -463,8 +466,8 @@ def estimate(db, root, output, pilot_rows, raw_batch_size=1000, posting_batch_si
         save(path, report)
         for source in sources.values():
             arrow_schema(source)
-        prefix = prepare(db, sources, output / 'cohort', footprint(output))
-        prepare_postings(db, sources, output / 'posting_cohort', footprint(output))
+        prefix = prepare(db, sources, output / 'cohort', footprint(output), budget=budget)
+        prepare_postings(db, sources, output / 'posting_cohort', footprint(output), budget=budget)
         sources = dict(sources)
         sources['people_cohort'] = dict(source='mw_people', columns=[dict(column_name='user_id', data_type='numeric')])
         for name, source in sources.items():
@@ -478,7 +481,7 @@ def estimate(db, root, output, pilot_rows, raw_batch_size=1000, posting_batch_si
             block = max(1, math.ceil(len(frame) / 4))
             for start in range(0, len(frame), block):
                 part = frame.iloc[start:start + block]
-                sizes.append(write_part(part, folder / f'pilot-{start // block:02d}.parquet', footprint(output), schema=arrow_schema(source)))
+                sizes.append(write_part(part, folder / f'pilot-{start // block:02d}.parquet', footprint(output), budget=budget, schema=arrow_schema(source)))
                 counts.append(len(part))
             projected = storage_projection(rows, sizes, counts, sum(sizes))
             if rows == len(frame):
@@ -505,9 +508,10 @@ def estimate(db, root, output, pilot_rows, raw_batch_size=1000, posting_batch_si
     return report
 
 
-def download(db, report, estimate_dir, output, chunksize):
+def download(db, report, estimate_dir, output, chunksize, budget=None):
     import pandas as pd
-    gate(report)
+    budget = report.get('budget_bytes', BUDGET) if budget is None else budget
+    gate(report, budget=budget)
     country = report.get('country', 'Malawi')
     country_sql(country)
     if db.info.get('country', country) != country:
@@ -528,7 +532,7 @@ def download(db, report, estimate_dir, output, chunksize):
         raise ValueError('People cohort changed; run a new estimate.')
     output.mkdir(exist_ok=False)
     manifest = dict(status='incomplete', started_at_utc=now(), estimate=str(estimate_dir),
-                    tables={}, budget_bytes=BUDGET, actual_bytes=0, country=country,
+                    tables={}, budget_bytes=budget, actual_bytes=0, country=country,
                     raw_batch_size=db.info['mw_raw_batch_size'])
     path = output / 'manifest.json'
     save(path, manifest)
@@ -554,7 +558,7 @@ def download(db, report, estimate_dir, output, chunksize):
                         frame = pd.DataFrame({name: pd.Series([r[index] for r in records], dtype=object)
                                               for index, name in enumerate(result.keys())})
                         size = write_part(frame, folder / f"part-{state['parts']:06d}.parquet",
-                                          footprint(estimate_dir) + footprint(output),
+                                          footprint(estimate_dir) + footprint(output), budget=budget,
                                           schema=arrow_schema(report['sources'].get(name, {'columns': [dict(column_name='user_id', data_type='text')]})))
                         state['rows'] += len(frame)
                         state['parts'] += 1
@@ -579,6 +583,16 @@ def download(db, report, estimate_dir, output, chunksize):
     print(f"DOWNLOAD COMPLETE: {output}; {manifest['actual_bytes']/1e9:.3f} GB", flush=True)
 
 
+def positive_gb(value):
+    try:
+        result = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError('budget-gb must be a positive whole number') from None
+    if result < 1:
+        raise argparse.ArgumentTypeError('budget-gb must be a positive whole number')
+    return result
+
+
 def main(argv=None):
     import pyarrow as pa
     pa.set_cpu_count(1)
@@ -586,6 +600,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['estimate', 'download'])
     parser.add_argument('--country', choices=COUNTRIES, default='Malawi')
+    parser.add_argument('--budget-gb', type=positive_gb, help='Whole decimal GB cap; default 20 for new runs, saved cap on resume')
     parser.add_argument('--estimate', type=Path, help='Completed estimate directory for download')
     parser.add_argument('--pilot-rows', type=int, default=2000)
     parser.add_argument('--raw-batch-size', type=int, default=1000, help='People per raw-position query; download uses saved estimate value')
@@ -614,13 +629,17 @@ def main(argv=None):
         if args.command == 'estimate':
             with session(conn, args.timeout) as db:
                 db.info['country'] = args.country
-                report = estimate(db, root, estimate_dir, args.pilot_rows, args.raw_batch_size, args.posting_batch_size)
+                report = estimate(db, root, estimate_dir, args.pilot_rows, args.raw_batch_size, args.posting_batch_size,
+                                  budget=args.budget_gb * 1_000_000_000 if args.budget_gb is not None else BUDGET)
             if not args.download_if_safe:
                 return
         else:
             if args.estimate is None:
                 parser.error('download requires --estimate')
             report = json.loads((estimate_dir / 'estimate.json').read_text())
+        if args.budget_gb is not None:
+            report['budget_bytes'] = args.budget_gb * 1_000_000_000
+            save(estimate_dir / 'estimate.json', report)
         gate(report)
         with session(conn, args.timeout) as db:
             db.info['country'] = args.country

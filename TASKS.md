@@ -1,6 +1,6 @@
 # KLC tasks
 
-Hong Kong statuses last checked on October 4, 2026 (America/Chicago), using the
+Hong Kong statuses last checked on October 5, 2026 (America/Chicago), using the
 remote status command over SSH. Other jobs retain their previously recorded snapshots.
 Launch dates below use America/Chicago (CDT, UTC−05:00), converted from the UTC
 timestamp in each KLC job ID. Statuses are a snapshot; use the commands below
@@ -18,16 +18,49 @@ to check current progress.
 | `20261003T034030-cc5164` | 2026-10-02 22:40:30 | Restart Malawi estimate and gated download with indexed unmatched-education batches (`estimate --download-if-safe`). | Running: connected to WRDS; selecting cohort | `./klc logs 20261003T034030-cc5164` |
 | `20261003T235606-6f880b` | 2026-10-03 18:56:06 | First Hong Kong estimate-and-download launch from an isolated code copy. | Failed before WRDS connection: isolated copy lacked KLC settings link | `./klc logs 20261003T235606-6f880b` |
 | `20261003T235630-408292` | 2026-10-03 18:56:30 | Estimate all Hong Kong-linked products, then download if access checks and the 20 GB gate pass. | Failed: WRDS SSL EOF while counting raw job descriptions; full download never started | `./klc logs 20261003T235630-408292` |
-| `20261004T140024-56dfbb` | 2026-10-04 09:00:24 | Fresh Hong Kong estimate and gated download with 1,000-ID raw posting batches, checkpoints, and transport retries. | Running: WRDS connected; selecting Hong Kong people | `./klc logs 20261004T140024-56dfbb` |
+| `20261004T140024-56dfbb` | 2026-10-04 09:00:24 | Fresh Hong Kong estimate and gated download with 1,000-ID raw posting batches, checkpoints, and transport retries. | Stopped at 20 GB gate: completed estimate projects 21.01 GB; no full download started | `./klc logs 20261004T140024-56dfbb` |
+| `20261005T144257-3445aa` | 2026-10-05 09:42:57 | Resume completed Hong Kong estimate with a per-run 25 GB cap, preserving all 24 products and saved work. | Running: download stage initialized at 25 GB; first employment count check in progress | `./klc logs 20261005T144257-3445aa` |
 
 The command is `./klc logs JOB_ID` (plural). To check one job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
 
-## Hong Kong resumable replacement
+## Hong Kong 25 GB resume
+
+Job `20261005T144257-3445aa` started at 09:42:57 CDT on October 5, using updated
+isolated code in `logs/hong_kong_cap25_code/`. The previous worker had completed
+all 24 product estimates and unmatched checks, then stopped at the 20 GB gate.
+Expected storage was 15,615,738,207 bytes; the planning estimate including the
+safety margin was 21,013,359,306 bytes. KLC reported about 125 GB free before
+this resume. All 132 regression tests passed on KLC.
+
+This resume reuses the existing estimate/checkpoint directory and data path:
+`results/hong_kong_estimate_20261004T140024976790Z/` and
+`data/hong_kong_20261004T140024976790Z/`. The cap is now 25,000,000,000 bytes for
+this run only. Original checkpoint/report metadata is backed up inside the
+estimate directory; the checkpoint records the old/new cap and timestamp.
+Other runs retain their default or saved cap. Existing code and artifacts remain.
+The worker connected to WRDS, loaded both frozen cohorts, passed the planning
+gate, and created the download manifest with `budget_bytes=25000000000`. The
+first employment-table unit is performing its count check before writing parts.
+
+Launch command:
+
+```sh
+./klc run python logs/hong_kong_cap25_code/scripts/malawi_extract.py \
+  estimate --resume /gpfs/kellogg/proj/cxv7409/revelio_playground/results/hong_kong_estimate_20261004T140024976790Z \
+  --budget-gb 25
+```
+
+Future resumes use the same updated deployment and can omit `--budget-gb` to
+retain the saved 25 GB cap. The download is complete only when the global
+manifest says `complete`.
+
+## Earlier Hong Kong resumable estimate
 
 Replacement job: `20261004T140024-56dfbb`, launched at 09:00:24 CDT on October 4.
-The worker is running, connected to WRDS, and selecting Hong Kong person IDs.
-The full download has not yet been verified complete.
+This worker completed estimation for all 24 products and stopped because the
+21.01 GB planning estimate exceeded its 20 GB cap. It did not start the full
+download; the October 5 job above resumes its completed work.
 
 Estimate/checkpoint directory:
 `results/hong_kong_estimate_20261004T140024976790Z/`.
@@ -50,7 +83,8 @@ postings. These pilot checks validate bounded query behavior, not full coverage.
   estimate --country 'Hong Kong' --resumable --posting-batch-size 1000 --download-if-safe
 ```
 
-If the worker stops, resume using saved settings and completed work:
+The original resume command below is retained for history. After the cap change,
+use the updated October 5 deployment above:
 
 ```sh
 ./klc run python logs/hong_kong_resume_code_20261004/scripts/malawi_extract.py \
