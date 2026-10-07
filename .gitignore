@@ -29,3 +29,6 @@ results/
 *.log
 *.out
 *.toc
+
+# Reference papers (copyrighted; never commit)
+literature/
