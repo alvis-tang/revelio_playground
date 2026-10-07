@@ -1,0 +1,238 @@
+# Hong Kong Revelio, milestone 1: data inventory and migration replication.
+# Every measurement choice used by stages 00-05 is set here; title-based role
+# rules live in title_taxonomy.yml. Changing either file changes the run
+# fingerprint recorded in <work-root>/run/.
+version: 1
+milestone: hk_inventory_and_migration_replication_m1
+
+source:
+  # Completed KLC extract (read-only). Override with --source.
+  extract_dir: /gpfs/kellogg/proj/cxv7409/revelio_playground/data/hong_kong_20261004T140024976790Z
+  require_manifest_status: complete
+  # Logical name -> extract table directory used by the measurement stages.
+  tables:
+    positions: individual_positions
+    positions_raw: individual_positions_raw
+    users: individual_user
+    cohort: people_cohort
+    role_lookup_v2: individual_role_lookup_v2
+    role_lookup_v3: individual_role_lookup_v3
+    company_mapping: company_mapping
+    education: individual_user_education
+    school_mapping: school_mapping
+
+# Source mapping for analytical fields (documented in the data dictionary).
+field_mapping:
+  - {field: Person identifier, table: individual_positions, columns: [user_id]}
+  - {field: Position identifier, table: individual_positions, columns: [position_id]}
+  - {field: Employer, table: individual_positions, columns: [rcid, ultimate_parent_rcid]}
+  - {field: Job title, table: individual_positions_raw, columns: [title_raw]}
+  - {field: Occupation and function, table: individual_positions, columns: [role_k1500_v2, role_k17000_v3, onet_code], lookups: [individual_role_lookup_v2, individual_role_lookup_v3]}
+  - {field: Seniority and compensation, table: individual_positions, columns: [seniority, salary, start_salary, end_salary, total_compensation, additional_compensation]}
+  - {field: Employment dates and location, table: individual_positions, columns: [startdate, enddate, country, city, metro_area]}
+  - {field: Profile location and refresh, table: individual_user, columns: [user_country, user_location, updated_dt]}
+  - {field: Education and institution, table: individual_user_education, columns: [university_name, rsid, degree, field, startdate, enddate], lookups: [school_mapping]}
+  - {field: Industry and headquarters, table: company_mapping, columns: [rics_k50, rics_k200, rics_k400, naics_code, hq_country, hq_city]}
+  - {field: Prestige and network, table: individual_user, columns: [prestige, numconnections]}
+
+# Fields the analysis would want but that are absent from the downloaded
+# schemas. Inventory verifies absence by column-name search; no proxies.
+absent_fields:
+  - {field: Age or birth year, search: ['age', 'birth', 'dob', 'yob']}
+  - {field: Historical profile-location snapshots, search: ['location_history', 'snapshot', 'location_dt', 'location_date']}
+  - {field: Employment hours or type, search: ['hours', 'employment_type', 'job_type', 'fulltime', 'full_time', 'part_time']}
+  - {field: Position confidence, search: ['confidence', 'prob_position', 'position_score']}
+  - {field: Position refresh timestamps, search: ['position_updated', 'last_seen', 'scraped', 'refresh', 'updated_at']}
+  - {field: THE university rankings, search: ['the_rank', 'times_higher', 'ranking', 'world_rank']}
+
+inventory:
+  # Declared keys: duplicate and conflicting-key checks. null = no declared key.
+  keys:
+    individual_positions: [position_id]
+    individual_positions_raw: [position_id]
+    individual_user: [user_id]
+    individual_user_raw: [user_id]
+    individual_user_education: [user_id, education_number]
+    individual_user_education_raw: [user_id, education_number]
+    individual_user_skills: null
+    individual_user_skill_lookup: [skill_k35000]
+    individual_role_lookup_v2: [role_k1500_v2]
+    individual_role_lookup_v3: [role_k17000_v3]
+    postings_role_lookup_v2: [role_k1500_v2]
+    postings_role_lookup_v3: [role_k17000_v3]
+    sentiment_role_lookup: [role_k17000]
+    company_mapping: [rcid]
+    school_mapping: [rsid]
+    postings_cosmos: [job_id]
+    postings_cosmos_raw: [job_id]
+    people_cohort: [user_id]
+    months: [month]
+    regions: [country]
+    sentiment_scores: [rcid]
+    sentiment_individual_reviews: [review_id]
+    layoffs: null
+    workforce_dynamics_geo: [rcid, country, state, metro_area, seniority, role_k10, datemonth]
+  # Columns whose distinct values are counted (identifiers and categories).
+  distinct_columns: [user_id, position_id, rcid, ultimate_parent_rcid, rsid, job_id, country,
+                     user_country, hq_country, role_k1500_v2, role_k17000_v3, onet_code,
+                     seniority, degree, highest_degree, skill_k35000, review_id, region]
+  # Free-text columns skipped by the blank-string check (nulls still counted).
+  free_text_columns: [description, profile_summary, review_summary, review_advice,
+                      review_pros, review_cons, slogan, company_raw, location_raw,
+                      title_raw, jobtitle_translated, skill_raw, skill_translated,
+                      university_raw, degree_raw, field_raw, fullname, profile_title]
+  joins:
+    - {name: positions_to_cohort, left: individual_positions, right: people_cohort, left_on: [user_id], right_on: [user_id]}
+    - {name: positions_to_users, left: individual_positions, right: individual_user, left_on: [user_id], right_on: [user_id]}
+    - {name: positions_to_raw_titles, left: individual_positions, right: individual_positions_raw, left_on: [position_id], right_on: [position_id]}
+    - {name: raw_titles_to_positions, left: individual_positions_raw, right: individual_positions, left_on: [position_id], right_on: [position_id]}
+    - {name: positions_to_role_v2, left: individual_positions, right: individual_role_lookup_v2, left_on: [role_k1500_v2], right_on: [role_k1500_v2]}
+    - {name: positions_to_role_v3, left: individual_positions, right: individual_role_lookup_v3, left_on: [role_k17000_v3], right_on: [role_k17000_v3]}
+    - {name: positions_to_company, left: individual_positions, right: company_mapping, left_on: [rcid], right_on: [rcid]}
+    - {name: positions_parent_to_company, left: individual_positions, right: company_mapping, left_on: [ultimate_parent_rcid], right_on: [rcid]}
+    - {name: cohort_to_users, left: people_cohort, right: individual_user, left_on: [user_id], right_on: [user_id]}
+    - {name: users_to_positions, left: individual_user, right: individual_positions, left_on: [user_id], right_on: [user_id]}
+    - {name: users_to_raw_profiles, left: individual_user, right: individual_user_raw, left_on: [user_id], right_on: [user_id]}
+    - {name: education_to_users, left: individual_user_education, right: individual_user, left_on: [user_id], right_on: [user_id]}
+    - {name: education_to_school, left: individual_user_education, right: school_mapping, left_on: [rsid], right_on: [rsid]}
+    - {name: education_to_raw, left: individual_user_education, right: individual_user_education_raw, left_on: [user_id, education_number], right_on: [user_id, education_number]}
+    - {name: skills_to_users, left: individual_user_skills, right: individual_user, left_on: [user_id], right_on: [user_id]}
+    - {name: skills_to_lookup, left: individual_user_skills, right: individual_user_skill_lookup, left_on: [skill_k35000], right_on: [skill_k35000]}
+    - {name: postings_to_raw, left: postings_cosmos, right: postings_cosmos_raw, left_on: [job_id], right_on: [job_id]}
+    - {name: postings_to_company, left: postings_cosmos, right: company_mapping, left_on: [rcid], right_on: [rcid]}
+    - {name: postings_to_role_v2, left: postings_cosmos, right: postings_role_lookup_v2, left_on: [role_k1500_v2], right_on: [role_k1500_v2]}
+    - {name: workforce_to_company, left: workforce_dynamics_geo, right: company_mapping, left_on: [rcid], right_on: [rcid]}
+    - {name: reviews_to_company, left: sentiment_individual_reviews, right: company_mapping, left_on: [rcid], right_on: [rcid]}
+    - {name: layoffs_to_company, left: layoffs, right: company_mapping, left_on: [rcid], right_on: [rcid]}
+
+duckdb:
+  threads: 1
+  memory_limit: 6GB
+  # Spill directory; null uses <work-root>/tmp/duckdb. Size cap protects shared storage.
+  temp_directory: null
+  max_temp_directory_size: 60GB
+  preserve_insertion_order: false
+
+storage:
+  # Refuse to start a writing stage when the work-root file system has less free space.
+  min_free_gb: 25
+  parquet_compression: zstd
+  # Users are split into disjoint hash buckets for bounded per-bucket processing.
+  user_buckets: 32
+  # Raw-file immutability: listing (path, size, mtime) before and after every
+  # stage; full SHA-256 content hashes at inventory start and after replication.
+  content_hash_raw_files: true
+
+dates:
+  # Dates are month-level in the source (day 1); days are ignored.
+  granularity: month
+  # A recorded end month is the last month worked (inclusive).
+  end_month_inclusive: true
+  # Common cutoff from observed profile refresh coverage (max updated_dt).
+  common_cutoff: 2026-08-31
+  panel_start_quarter: 1950Q1
+  min_valid_start: 1950-01-01
+  last_complete_quarter: 2026Q2
+  # Quarter containing the cutoff; reported as partial, measured at the cutoff month.
+  partial_quarter: 2026Q3
+  # Missing end dates: primary rule and sensitivity.
+  end_rules:
+    carry_to_cutoff: {description: 'Missing end date carried to the common cutoff (2026-08).', primary: true}
+    cap_at_last_refresh: {description: "Missing end date capped at the month of the person's last profile refresh (updated_dt), and at the cutoff.", primary: false}
+  # Interpolation across gaps is disabled for this milestone.
+  interpolate_gaps: false
+
+primary_position:
+  # Employment is measured at each quarter-end month (Mar, Jun, Sep, Dec).
+  observation_point: quarter_end_month
+  # Order applied among positions active at the same quarter end:
+  # 1) positions matched by title_taxonomy.yml rules last;
+  # 2) most recent start month first;
+  # 3) position_id ascending (string order) as the deterministic tie-breaker.
+  rank_order: [role_rule_downranked_last, latest_start_month_first, position_id_ascending]
+  # No confidence, hours, or employment-type data exist; none are invented.
+
+location:
+  hong_kong_country: Hong Kong
+  # Status uses the country field only. Macao, mainland China, and metro/city
+  # values do not determine Hong Kong status (metro conflicts are diagnosed).
+  status_field: country
+  # remote_suitability describes the job, not residence; it is never used.
+  use_remote_suitability: false
+  specifications:
+    position_with_profile_fallback:
+      label: Position with profile fallback
+      primary: true
+      description: >-
+        Country of the primary quarter-end position; if that position lacks a
+        country, the person's profile country (single current snapshot) with a
+        snapshot/backcast/forwardcast flag. Profile-only people contribute a
+        dated snapshot in their refresh quarter. Gaps without an active position
+        stay unknown.
+    position_only:
+      label: Position only
+      primary: false
+      description: >-
+        Country of the primary quarter-end position only. Missing country and
+        quarters without an active position are unknown.
+  # Profile-only people: no valid dated position. They get one snapshot row in
+  # the quarter of updated_dt when that quarter is complete; otherwise they are
+  # reported separately. No historical employment is manufactured.
+  profile_only_snapshot: refresh_quarter_if_complete
+
+migration:
+  persistence_quarters: [1, 2, 4]
+  # A change in Hong Kong status is confirmed once the destination status holds
+  # for k consecutive known quarters; the move is dated to the first
+  # destination quarter. Short excursions do not reset the confirmed status.
+  # Unknown quarters (gaps, missing location) break transition inference: a
+  # status change across a gap is recorded as an undated gap change, never as a
+  # migration event. First observed status is left-censored; record endings and
+  # unconfirmed terminal moves are censored, not departures.
+  date_moves_to: first_destination_quarter
+  unknown_gaps_break_inference: true
+  # Employer used for same-employer transfer status; rcid is also reported.
+  employer_identifier: ultimate_parent_rcid
+  secondary_employer_identifier: rcid
+
+replication:
+  # Approximate replication of Kwan, Tang, and Wong (2024), Hong Kong Economic
+  # Policy Green Paper. Retrospective reconstruction from the 2026 extract, not
+  # a recreation of the paper's October 2023 snapshot.
+  windows:
+    primary: {start: 2019Q4, end: 2023Q3, label: 'Primary approximate replication'}
+    sensitivity: {start: 2018Q4, end: 2023Q3, label: 'Sensitivity: earlier pre-period'}
+  # Persistence confirmation only uses quarters up to the window end.
+  confirm_within_window: true
+  # Event counted in a window when start < event quarter <= end.
+  event_window_rule: origin_quarter_at_or_after_start
+  counts: unweighted_people
+  benchmarks:
+    narrative:
+      source: 'Kwan, Tang, and Wong (2024), p. 71 text'
+      stayed: 255911
+      entered: 31835
+      departed: 26836
+      net: 4999
+    table3:
+      source: 'Kwan, Tang, and Wong (2024), Table 3 (Transitions, Within vs Across Firm)'
+      note: >-
+        Table 3 cells do not sum to the narrative counts (departed 26,896 vs
+        26,836; entered 32,911 vs 31,835; stayed 257,976 vs 255,911). They are
+        preserved as published and not reconciled.
+      cells:
+        departed_different_company: 21690
+        departed_same_company: 5206
+        entered_different_company: 21136
+        entered_same_company: 11775
+        stayed_different_company: 72659
+        stayed_same_company: 185317
+  unavailable:
+    - {measure: net_migration_by_age_group, reason: 'Age and birth year are absent from the extract; not estimated from education dates in this milestone.'}
+    - {measure: alma_mater_THE_rank, reason: 'Times Higher Education rankings are absent from the extract.'}
+
+sampling:
+  # Reproducible hash selection of panel participants (anyone with a panel row).
+  max_people: 1000
+  salt: hk_revelio_m1_sample_v1
+  method: sha256(salt || ':' || user_id), ascending; first max_people

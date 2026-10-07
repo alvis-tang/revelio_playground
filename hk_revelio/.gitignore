@@ -1,0 +1,7 @@
+# Pipeline outputs are derived from licensed extract data: never commit them.
+data/
+output/
+run/
+tmp/
+docs/data_dictionary.md
+.venv/

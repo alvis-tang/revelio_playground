@@ -1,0 +1,91 @@
+# Auditable title rules for choosing a primary position among concurrent jobs.
+#
+# A matched rule only *downranks* a position when another active position exists
+# in the same quarter; it never removes a position from the panel. Rules apply to
+# `individual_positions_raw.title_raw` after the normalization below. Patterns use
+# RE2 syntax (DuckDB `regexp_matches`); RE2 has no look-around, so false positives
+# are removed by explicit category `exclude` patterns.
+#
+# Rules are deliberately conservative: only clearly identified board, advisory,
+# part-time, and internship roles. Ambiguous titles such as "Advisor",
+# "Senior Advisor", "Financial Advisor", "Executive Director", "Chairman",
+# "董事長", "Trainee", "Volunteer", or "Adjunct" are NOT matched. The first
+# matching category in `order` is recorded as the role-rule category; all
+# matched rule ids are kept for provenance. Calibrated against the most frequent
+# matched and near-miss titles in the October 2026 Hong Kong extract; stage 03
+# writes the top titles per rule to output/diagnostics/title_rule_audit.csv.
+version: 2
+match_field: title_raw
+normalization:
+  trim: true
+  collapse_whitespace: true
+  lowercase: true
+  # Applied in order after lower-casing, so "non-executive" and "非執行" never
+  # match patterns written for executive roles.
+  replacements:
+    - pattern: 'non[- ]?exec(utive)?'
+      replacement: 'nonexecutive'
+    - pattern: '非執行|非执行'
+      replacement: 'nonexecutive'
+order: [advisory, board, part_time, internship]
+categories:
+  advisory:
+    description: Advisory-board style roles, not advisory professions.
+    include:
+      - id: advisory_body
+        pattern: '\badvisory (board|council|committee|panel|group)\b|\bboard of advis[oe]rs\b'
+      - id: board_advisor
+        pattern: '\bboard advis[oe]rs?\b|\badvis[oe]rs? to the board\b'
+      - id: startup_advisor
+        pattern: '\bstart-?up advis[oe]rs?\b'
+      - id: zh_advisory_body
+        pattern: '顧問委員會|顾问委员会|諮詢委員會|咨询委员会'
+    exclude: []
+  board:
+    description: Non-executive board, supervisory, trustee, observer, and governor roles.
+    include:
+      - id: board_member
+        pattern: '\bboard (members?|directors?|of directors?|of trustees?|of governors?|trustees?|treasurer|observers?|governors?|chair(man|woman|person)?)\b|\bboardmembers?\b|\bdirector of the board\b'
+      - id: member_of_board
+        pattern: '\bmember,? (of )?(the )?board\b'
+      - id: supervisory_board
+        pattern: '\bsupervisory board\b'
+      - id: non_executive
+        pattern: '\bnonexecutive\b|\bned\b'
+      - id: independent_director
+        pattern: '\bindependent (nonexecutive )?directors?\b'
+      - id: chair_of_board
+        pattern: '\bchair(man|woman|person)? of (the )?board\b'
+      - id: trustee
+        pattern: '\btrustees?\b'
+      - id: school_governor
+        pattern: '\b(school|college|university|parent|co-opted) governors?\b|\bchair of governors\b'
+      - id: zh_board
+        pattern: '董事會成員|董事会成员|獨立董事|独立董事'
+    exclude:
+      - id: trustee_profession
+        pattern: '\b(trustee|trustees|fiduciary) (services?|operations?|officer|administration|administrator|manager|management|analyst|associate|executive|specialist|accountant|business|team|department)\b'
+      - id: board_secretary
+        pattern: '\bboard secretar|\bsecretary (to|of) the board\b|董事會秘書|董事会秘书|董事會辦公室|董事会办公室'
+      - id: executive_board_or_combined_executive_title
+        pattern: '\bexecutive (board|chair(man|woman|person)?|director)\b|\b(ceo|chief executive|managing director|general manager)\b|執行董事|执行董事'
+  part_time:
+    description: Explicitly part-time positions.
+    include:
+      - id: part_time
+        pattern: '\bpart[- ]?time\b|\bparttime\b'
+      - id: zh_part_time
+        pattern: '兼職|兼职|兼任'
+    exclude: []
+  internship:
+    description: Explicit internships and summer analyst/associate programmes.
+    include:
+      - id: intern
+        pattern: '\binterns?\b|\binternships?\b'
+      - id: summer_programme
+        pattern: '\bsummer (analyst|associate|intern|internship|placement)s?\b'
+      - id: co_op_student
+        pattern: '\bco-?op (student|intern|placement)s?\b'
+      - id: zh_intern
+        pattern: '實習|实习|インターン'
+    exclude: []

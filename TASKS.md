@@ -1,6 +1,6 @@
 # KLC tasks
 
-Hong Kong statuses last checked on October 5, 2026 (America/Chicago), using the
+Hong Kong statuses last checked on October 7, 2026 (America/Chicago), using the
 remote status command over SSH. Other jobs retain their previously recorded snapshots.
 Launch dates below use America/Chicago (CDT, UTC−05:00), converted from the UTC
 timestamp in each KLC job ID. Statuses are a snapshot; use the commands below
@@ -19,10 +19,35 @@ to check current progress.
 | `20261003T235606-6f880b` | 2026-10-03 18:56:06 | First Hong Kong estimate-and-download launch from an isolated code copy. | Failed before WRDS connection: isolated copy lacked KLC settings link | `./klc logs 20261003T235606-6f880b` |
 | `20261003T235630-408292` | 2026-10-03 18:56:30 | Estimate all Hong Kong-linked products, then download if access checks and the 20 GB gate pass. | Failed: WRDS SSL EOF while counting raw job descriptions; full download never started | `./klc logs 20261003T235630-408292` |
 | `20261004T140024-56dfbb` | 2026-10-04 09:00:24 | Fresh Hong Kong estimate and gated download with 1,000-ID raw posting batches, checkpoints, and transport retries. | Stopped at 20 GB gate: completed estimate projects 21.01 GB; no full download started | `./klc logs 20261004T140024-56dfbb` |
-| `20261005T144257-3445aa` | 2026-10-05 09:42:57 | Resume completed Hong Kong estimate with a per-run 25 GB cap, preserving all 24 products and saved work. | Running: download stage initialized at 25 GB; first employment count check in progress | `./klc logs 20261005T144257-3445aa` |
+| `20261005T144257-3445aa` | 2026-10-05 09:42:57 | Resume completed Hong Kong estimate with a per-run 25 GB cap, preserving all 24 products and saved work. | Complete: all 24 products and the cohort downloaded (9,371,963,844 bytes); global manifest `complete` at 2026-10-06 18:47:53 CDT | `./klc logs 20261005T144257-3445aa` |
+| `20261007T161803-1bf289` | 2026-10-07 11:18:03 | Hong Kong measurement milestone 1, stages 00-05 (first launch). | Cancelled during raw hashing to relaunch with final configuration; no outputs written | `./klc logs 20261007T161803-1bf289` |
+| `20261007T162019-6e8764` | 2026-10-07 11:20:19 | Hong Kong measurement milestone 1: inventory, cleaning, quarterly panel, diagnostics, migration events, and approximate replication (`hk_revelio/run.py --stages all`). | Complete in 1 h 51 min; raw listing and content hashes unchanged | `./klc logs 20261007T162019-6e8764` |
+| `20261007T181351-e23ad8` | 2026-10-07 13:13:51 | Rerun milestone stages 00 and 03 (data-dictionary join labels; quarantine denominators). | Complete in 36 min; raw listing unchanged; code hash matches the committed code | `./klc logs 20261007T181351-e23ad8` |
 
 The command is `./klc logs JOB_ID` (plural). To check one job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
+
+## Hong Kong measurement milestone 1
+
+Code: [`hk_revelio/`](hk_revelio/README.md), deployed for these runs to the isolated
+KLC path `logs/hk_revelio_code_20261007/hk_revelio/`, so the remote checkout and its
+uncommitted edits are untouched. DuckDB 1.5.6 and PyYAML live in
+`logs/hk_revelio_env/`; the toolkit `.venv` is unchanged. Jobs used one thread and
+a 6 GB DuckDB memory limit.
+
+Input (read-only): `data/hong_kong_20261004T140024976790Z/`. Work root and all
+derived data: `results/hk_revelio_m1_20261007/`, with per-stage fingerprints under
+`run/`. The requested artifacts were copied to the local ignored paths
+`hk_revelio/docs/data_dictionary.md`, `hk_revelio/output/diagnostics/`,
+`hk_revelio/output/tables/replication_summary.csv`, and
+`hk_revelio/data/derived/person_quarter_sample.parquet`.
+
+The full run completed all six stages. Stages 00 and 03 were then rerun with
+presentation-only fixes: join relationship labels in the data dictionary, and
+denominators for quarantined-position counts. Stages 01, 02, 04, and 05 ran with
+the earlier code hash, which differs only in those two files. All 18 pipeline
+tests and all 132 repository tests passed. The milestone stops here until the
+measurement results are inspected.
 
 ## Hong Kong 25 GB resume
 

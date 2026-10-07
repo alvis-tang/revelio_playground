@@ -1,0 +1,3 @@
+duckdb>=1.1,<2
+pyarrow>=18,<26
+pyyaml>=6,<7

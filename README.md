@@ -403,3 +403,24 @@ does not change the selected products or remove the safety margin. The selected
 cap includes retained artifacts and applies to cohort files, pilots, download
 parts, and final storage checks. Available-space, access, schema, row-count, and
 Parquet checks remain required. Check the global manifest for completion.
+
+## Hong Kong measurement pipeline (milestone 1)
+
+[`hk_revelio/`](hk_revelio/README.md) runs on the completed Hong Kong extract
+on KLC and does not query WRDS. Stages `00_inventory` through `05_replication`:
+
+- inventory every downloaded table;
+- clean and quarantine records;
+- build a quarter-end person panel under two end-date rules;
+- write coverage diagnostics;
+- classify Hong Kong spells and migration events at 1-, 2-, and 4-quarter
+  persistence;
+- approximately replicate the 2019Q4-2023Q3 counts of Kwan, Tang, and Wong
+  (2024).
+
+Rules are in [`hk_revelio/docs/methodology.md`](hk_revelio/docs/methodology.md);
+settings are in `hk_revelio/config/`. The pipeline uses a dedicated
+DuckDB/PyYAML environment, which leaves the toolkit's `.venv` unchanged. All
+derived data and outputs stay ignored by Git. Run its tests with
+`python -m unittest discover -s hk_revelio/tests -v` after installing
+`hk_revelio/requirements.txt`.
