@@ -54,6 +54,89 @@ project's `executions/4306579_TIMESTAMP/` directory. `pilot.json` reports comple
 only after four valid results and GPU offload are confirmed. Existing remote
 research changes were preserved. See the README's local LLM section for reuse.
 
+## Independent multilingual Qwen3 pilot
+
+Submitted native Slurm job **4313662** (`revelio-multilingual`) on October 18,
+2026 at **11:16:56 CDT** (America/Chicago). The submission requests account and
+partition `kellogg`, one GPU, four CPU cores, 16 GB RAM, and 30 minutes. It runs
+all 16 frozen ads, one posting per request, using `qwen3:8b`, temperature `0.7`,
+`reasoning_effort: none`, and a 3,000-token output limit.
+
+The project is
+`/gpfs/kellogg/proj/cxv7409/revelio_playground/results/revelio_multilingual_20261018T161200Z/`.
+Its Slurm log is
+`/gpfs/kellogg/proj/cxv7409/revelio_playground/logs/revelio_multilingual_4313662.log`.
+The isolated deployment is `logs/revelio_multilingual_code_20261018/`, under the
+same repository root. Existing remote edits and the original Llama runner and
+wrapper were preserved. All 10 SHA-256 hashes for the original Llama project's
+source files and runners matched the pre-task snapshot; job **4306579** was
+still pending with its original configuration and project.
+
+The sample contains exactly two unique ads in each of eight groups: English,
+Chinese, Spanish, French, Arabic, Japanese, Korean, and mixed Chinese/English.
+The Chinese pair contains one simplified and one traditional description.
+Candidate retrieval returned **1,800 descriptions**, within the 2,000-description
+cap. All retrieval statements used a 60-second timeout; saved plans show the
+posting-date index and indexed raw-ID lookups. An initial query that sorted date
+ties timed out without returning descriptions; the successful query streams
+from the date index. Geography guided retrieval, while local Lingua 2.1.1
+passage classification and OpenCC character mappings determined inclusion.
+Ambiguous classifications, conflicting duplicate IDs, and duplicate descriptions
+were excluded. Candidate counts after classification/deduplication were 201
+English, 322 Chinese, 42 Spanish, 112 French, 4 Arabic, 24 Japanese, 104 Korean,
+and 5 mixed Chinese/English ads. Sorted IDs and seed 42 selected the frozen ads.
+
+The project's `source.json` archives the candidate pool, classifications, queries,
+parameters, plans, and dependency versions. `language_coverage.json` reports
+complete coverage and freezes selected IDs, languages, script evidence, and
+substantial passage offsets. `freeze.json` binds the inputs, classifications,
+prompts, schema, configuration, and extraction metadata with SHA-256 hashes.
+Its recorded digest is
+`39872c65bf952a4aaee5a10ad6be745511e6ddebbbf22d10ee837aae02fb307e`.
+Raw UTF-8 text and string IDs remain in the ignored project, including a local
+copy under the same relative `results/` path.
+
+All **153 repository tests passed locally**, with no skips. All **21 focused
+LLM/multilingual tests passed on KLC**. The complete real-data project passed
+local and KLC validation and preparation of all 16 requests, including exact
+string IDs, unchanged Unicode/whitespace, Qwen3 model/options, and exclusion of
+company and geography metadata. Preflight caught upstream whitespace trimming;
+a scoped multilingual input adapter preserves the original text without changing
+the default Llama path. Reports are `preflight_validation.json` and
+`preflight_requests.json` in the project. No model inference was run on a login
+node or the Mac.
+
+Slurm's `sbatch --test-only` preflight passed **before submission**, estimating
+**October 18, 2026 at 14:36:54 CDT** on `qgpu0518`. At the first post-submission
+check, job 4313662 was **PENDING** and its actual `StartTime` was still `Unknown`;
+the preflight estimate is provisional. Live inference, quote validation on model
+outputs, exact final ID coverage, and GPU offload remain **pending**. Submission
+is the handoff point while the job is queued. Runtime completion requires all
+16 valid results, exact frozen ID coverage, valid evidence for every extracted
+item, and positive GPU model offload in `gpu_usage.json`, with `pilot.json`
+reporting `complete`.
+
+Launch command, from the remote repository root:
+
+```sh
+sbatch --parsable --job-name=revelio-multilingual \
+  --output=logs/revelio_multilingual_%j.log \
+  --export=ALL,KLC_ROOT=/kellogg/proj/cxv7409/revelio_playground/logs/revelio_multilingual_code_20261018 \
+  logs/revelio_multilingual_code_20261018/scripts/revelio_llm.sbatch \
+  /kellogg/proj/cxv7409/revelio_playground/results/revelio_multilingual_20261018T161200Z \
+  --profile multilingual
+```
+
+Monitor using `squeue -j 4313662`,
+`sacct -j 4313662 --format=JobID,State,ExitCode,Elapsed,AllocTRES`, and the log
+above. Execution artifacts will be under the project's
+`executions/4313662_TIMESTAMP/`. Each extracted skill or education requirement
+must include an English phrase and a short verbatim source-description quote;
+missing or fabricated evidence fails the record. Detected languages and reading
+status distinguish unreadable text from absent requirements. English normalization
+and faithful interpretation still require researcher review; this is a
+language-coverage smoke test, not an accuracy benchmark.
+
 ## Toolkit job commands
 
 The command is `./klc logs JOB_ID` (plural). To check one toolkit job's current status,

@@ -320,6 +320,79 @@ Offline checks: `python3 -m unittest discover -s tests -p 'test_revelio_llm.py' 
 Run the same command with `.venv-llm/bin/python` on KLC to include the real package
 preparation check for long IDs and exclusion of local metadata from prompts.
 
+### Independent multilingual Qwen3 pilot
+
+Install `requirements-multilingual.txt` in `.venv-llm` (Python 3.10–3.13), then
+create a separate project. This leaves the default Llama configuration unchanged:
+
+```sh
+.venv-llm/bin/python -m pip install -r requirements-multilingual.txt
+.venv-llm/bin/python scripts/revelio_llm.py extract-multilingual
+.venv-llm/bin/python scripts/revelio_llm.py validate-multilingual PROJECT_DIRECTORY
+sbatch --test-only --job-name=revelio-multilingual scripts/revelio_llm.sbatch \
+  PROJECT_DIRECTORY --profile multilingual
+sbatch --job-name=revelio-multilingual --output=logs/revelio_multilingual_%j.log \
+  scripts/revelio_llm.sbatch PROJECT_DIRECTORY --profile multilingual
+```
+
+Run from the repository root, after synchronizing the scripts. The existing
+wrapper supplies one GPU, four CPU cores, 16 GB RAM, and 30 minutes. It supports
+an isolated deployment through `KLC_ROOT`; use an absolute project path there.
+`run --profile multilingual` requires Qwen3, all 16 records, and seed 42.
+
+Candidate retrieval uses the indexed posting date and targeted countries, with
+indexed raw-ID lookups, a 60-second statement timeout, and at most 2,000 returned
+descriptions in total. Geography guides retrieval; local Lingua 2.1.1 classifies
+substantial passages across all supported languages. Confident contiguous spans
+must contain at least 40 letters. A single language must cover at least 85% of
+letters. Mixed Chinese/English requires at least 15% in each language, 85%
+combined, 100 English letters, and 60 Chinese letters. OpenCC character mappings
+require at least two distinct script-specific characters and no opposing script
+characters. Ambiguous classifications are excluded.
+
+The sample contains two unique ads each for English, Chinese, Spanish, French,
+Arabic, Japanese, Korean, and mixed Chinese/English. The Chinese pair includes
+one simplified and one traditional posting. Duplicate descriptions are excluded.
+Candidates are retrieved in index order within date windows; date ties are not
+randomized or guaranteed to repeat against the live database. The archived
+candidate pool, sorted IDs, and seed 42 reproduce selection. Missing coverage
+writes a report and stops without creating an inference-ready project.
+
+Each project owns its UTF-8 JSONL/CSV inputs, prompts, schema, `source.json`,
+`language_coverage.json`, and SHA-256 `freeze.json`. Extraction metadata archives
+the candidate records, classifications, query parameters, and plans. Frozen IDs,
+classifications, and source files are checked before preflight and inference.
+Only record IDs, titles, and unchanged descriptions enter prompts. A scoped
+input adapter preserves whitespace, CRLF, empty titles, and literal `NA` strings
+that the batch package normally normalizes; the default Llama path retains its
+existing input behavior.
+
+The multilingual configuration sends `qwen3:8b`, temperature `0.7`, and
+`reasoning_effort: none`, with one posting per request and a 3,000-token output
+limit. The job-local server uses a 32,768-token context. Qwen documents
+[multilingual coverage including both Chinese scripts](https://qwenlm.github.io/blog/qwen3/);
+Ollama documents [`none` as disabling thinking](https://docs.ollama.com/api/openai-compatibility).
+Preflight validates the complete project and verifies every prepared request's
+model, options, fields, Unicode text, string IDs, and exact 16-ID coverage.
+
+Outputs contain detected languages, a reading status, an English reading note,
+and arrays of skills and education requirements. Each requirement pairs English
+text with a verbatim description quote of at most 240 characters. Empty arrays
+with `readable` mean no explicit requirement was stated; with `unreadable` they
+mean extraction was impossible. Partial or unreadable text requires an explanation.
+The evidence audit checks every quote as an exact Unicode substring, rejects
+missing/fabricated evidence or language disagreement, removes failed records
+from result files, and records failures. Exact ID coverage, 16 valid results,
+and confirmed GPU offload are all required for `pilot.json` to reach `complete`.
+Quote presence does not establish faithful interpretation or accurate English
+normalization; this is a coverage smoke test requiring researcher review.
+
+Run focused tests with a Python version supporting pinned Lingua:
+
+```sh
+.venv-llm/bin/python -m unittest discover -s tests -p 'test_revelio*py' -v
+```
+
 ## Code, storage, and validation
 
 Environments, data, outputs, logs, and local settings are ignored by Git. Use Git

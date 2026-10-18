@@ -156,6 +156,7 @@ def ollama_server(directory, models, module='ollama/0.18.2', command=None, start
         'OLLAMA_HOST': f'127.0.0.1:{port}', 'OLLAMA_MODELS': str(models),
         'OLLAMA_NUM_PARALLEL': '1', 'OLLAMA_MAX_LOADED_MODELS': '1',
         'OLLAMA_KEEP_ALIVE': '5m',
+        'OLLAMA_CONTEXT_LENGTH': '32768',
     }.items():
         environment[key] = value
         environment['SINGULARITYENV_' + key] = value
@@ -206,20 +207,33 @@ def check_audit(report, expected):
         raise ValueError(f'Pilot incomplete; inspect outputs/failures.jsonl and run_reports/audit.json: {report}')
 
 
-def run(project, sample_size=4, seed=42, model=DEFAULT_MODEL, module='ollama/0.18.2'):
+def run(project, sample_size=None, seed=42, model=None, module='ollama/0.18.2', profile='default'):
     if not os.environ.get('SLURM_JOB_ID'):
         raise ValueError('Run model inference inside sbatch using scripts/revelio_llm.sbatch.')
+    multilingual = profile == 'multilingual'
+    model = model or ('qwen3:8b' if multilingual else DEFAULT_MODEL)
+    sample_size = sample_size if sample_size is not None else (16 if multilingual else 4)
+    if multilingual and (model != 'qwen3:8b' or sample_size != 16 or seed != 42):
+        raise ValueError('Multilingual profile requires qwen3:8b, all 16 frozen records, and seed 42.')
     if sample_size < 1:
         raise ValueError('--sample-size must be positive.')
     project = Path(project).resolve()
+    coverage = None
+    frozen_records = None
+    if multilingual:
+        from revelio_multilingual import validate_frozen
+        frozen_records, coverage = validate_frozen(project)
     import yaml
     from kellogg_llm_batch.core import prepare_run, submit_run, audit_run
     from kellogg_llm_batch.config import load_config
     from kellogg_llm_batch.data import load_source
     from kellogg_llm_batch.validation import validate_project
     settings = yaml.safe_load((project / 'project.yaml').read_text(encoding='utf-8'))
-    frame, _, _ = load_source(load_config(project / 'project.yaml'))
-    records = json.loads(frame.to_json(orient='records', date_format='iso', force_ascii=False))
+    if multilingual:
+        records = frozen_records
+    else:
+        frame, _, _ = load_source(load_config(project / 'project.yaml'))
+        records = json.loads(frame.to_json(orient='records', date_format='iso', force_ascii=False))
     checked_records(records)
     if sample_size > len(records):
         raise ValueError(f'--sample-size {sample_size} exceeds the {len(records)} input records.')
@@ -256,33 +270,46 @@ def run(project, sample_size=4, seed=42, model=DEFAULT_MODEL, module='ollama/0.1
         api(base_url, '/api/pull', {'model': model, 'stream': False}, timeout=1200)
         # The derived model fixes context length and CPU use without changing the base model.
         alias = 'revelio-' + job
-        api(base_url, '/api/create', {'model': alias, 'from': model, 'stream': False,
-            'parameters': {'num_ctx': 32768, 'num_thread': cpus}}, timeout=120)
+        served_model = model if multilingual else alias
+        if not multilingual:
+            api(base_url, '/api/create', {'model': alias, 'from': model, 'stream': False,
+                'parameters': {'num_ctx': 32768, 'num_thread': cpus}}, timeout=120)
         provenance['model_tags'] = api(base_url, '/api/tags')
         provenance['ollama_version'] = api(base_url, '/api/version')
         write_json(execution / 'environment.json', provenance)
         provider = settings['providers']['openai_compatible']
-        provider.update(model=alias, base_url=base_url + '/v1',
+        provider.update(model=served_model, base_url=base_url + '/v1',
                         sync_input_price_per_million=0, sync_output_price_per_million=0)
         provider.pop('api_key_env_var', None)
         config = execution / 'project.yaml'
         write_json(config, settings)
-        validate_project(config, execution / 'validation.json')
-        run_dir = prepare_run(config, 'openai_compatible', sample_size=sample_size,
-                              seed=seed, execution='sync')
+        if multilingual:
+            from revelio_multilingual import prepare, validate_requests
+            run_dir = prepare(config, execution / 'validation.json')
+            write_json(execution / 'request_validation.json', validate_requests(run_dir, records))
+        else:
+            validate_project(config, execution / 'validation.json')
+            run_dir = prepare_run(config, 'openai_compatible', sample_size=sample_size,
+                                  seed=seed, execution='sync')
         write_json(execution / 'pilot.json', {'status': 'prepared', 'run_dir': str(run_dir),
                                             'sample_size': sample_size, 'seed': seed})
         print(f'Prepared {sample_size} records. Run: {run_dir}', flush=True)
         submit_run(run_dir)
+        evidence = None
+        if multilingual:
+            from revelio_multilingual import audit_evidence
+            evidence = audit_evidence(run_dir, records, coverage)
         audit = audit_run(run_dir)
         check_audit(audit, sample_size)
         active = api(base_url, '/api/ps')
         write_json(execution / 'gpu_usage.json', active)
-        loaded = [entry for entry in active.get('models', []) if entry.get('name', '').split(':')[0] == alias]
+        loaded = [entry for entry in active.get('models', [])
+                  if entry.get('name', '').split(':')[0] == served_model.split(':')[0]]
         if not loaded or not all(entry.get('size_vram', 0) > 0 for entry in loaded):
             raise ValueError('No GPU model offload confirmed; inspect gpu_usage.json and ollama.log.')
         write_json(execution / 'pilot.json', {'status': 'complete', 'run_dir': str(run_dir),
-                                            'sample_size': sample_size, 'seed': seed, 'audit': audit})
+                                            'sample_size': sample_size, 'seed': seed, 'audit': audit,
+                                            'evidence_audit': evidence})
         print(f'Pilot complete: {sample_size} valid records; GPU offload confirmed. Results: {run_dir}/outputs',
               flush=True)
     return run_dir
@@ -294,17 +321,29 @@ def main(argv=None):
     extraction = commands.add_parser('extract', help='Extract at most 20 postings and create a project.')
     extraction.add_argument('--limit', type=int, default=20)
     extraction.add_argument('--output', type=Path)
+    multilingual = commands.add_parser('extract-multilingual', help='Freeze a complete 16-ad language-coverage project.')
+    multilingual.add_argument('--output', type=Path)
+    multilingual.add_argument('--candidate-limit', type=int, default=2000)
+    validation = commands.add_parser('validate-multilingual', help='Validate frozen inputs and all Qwen3 requests without inference.')
+    validation.add_argument('project', type=Path)
     inference = commands.add_parser('run', help='Run a pilot inside a Slurm GPU allocation.')
     inference.add_argument('project', type=Path)
-    inference.add_argument('--sample-size', type=int, default=4)
+    inference.add_argument('--sample-size', type=int)
     inference.add_argument('--seed', type=int, default=42)
-    inference.add_argument('--model', default=DEFAULT_MODEL)
+    inference.add_argument('--model')
+    inference.add_argument('--profile', choices=('default', 'multilingual'), default='default')
     inference.add_argument('--ollama-module', default='ollama/0.18.2')
     args = parser.parse_args(argv)
     if args.command == 'extract':
         extract(args.limit, args.output)
+    elif args.command == 'extract-multilingual':
+        from revelio_multilingual import extract as extract_multilingual
+        extract_multilingual(args.output, candidate_limit=args.candidate_limit)
+    elif args.command == 'validate-multilingual':
+        from revelio_multilingual import preflight
+        preflight(args.project)
     else:
-        run(args.project, args.sample_size, args.seed, args.model, args.ollama_module)
+        run(args.project, args.sample_size, args.seed, args.model, args.ollama_module, args.profile)
 
 
 if __name__ == '__main__':
