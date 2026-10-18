@@ -24,7 +24,39 @@ to check current progress.
 | `20261007T162019-6e8764` | 2026-10-07 11:20:19 | Hong Kong measurement milestone 1: inventory, cleaning, quarterly panel, diagnostics, migration events, and approximate replication (`hk_revelio/run.py --stages all`). | Complete in 1 h 51 min; raw listing and content hashes unchanged | `./klc logs 20261007T162019-6e8764` |
 | `20261007T181351-e23ad8` | 2026-10-07 13:13:51 | Rerun milestone stages 00 and 03 (data-dictionary join labels; quarantine denominators). | Complete in 36 min; raw listing unchanged; code hash matches the committed code | `./klc logs 20261007T181351-e23ad8` |
 
-The command is `./klc logs JOB_ID` (plural). To check one job's current status,
+## Revelio LLM GPU pilot
+
+Setup completed on October 18, 2026. The fresh WRDS extract contains 20 postings
+under `results/revelio_llm_20261018T152442841200Z/` on KLC, and package validation
+passed. The dedicated environment is `.venv-llm`; the editable package checkout
+is `/kellogg/proj/cxv7409/llm-batch_pipeline`. Installation revision and dependency
+versions are recorded under `.venv-llm/` and copied into each execution's metadata.
+All eight new workflow tests passed on KLC, including real package preparation
+with long string IDs and server cleanup after failure or cancellation.
+
+The first native Slurm job, **4304976**, started earlier than the scheduler's
+initial estimate, downloaded the model, and started Ollama successfully on an
+A100 GPU node. It failed during package preparation because the compute node
+lacked a Git executable. The submission script now loads the native
+`git/2.47.0-gcc-12.4.0` module and checks Git through Python before inference.
+The downloaded weights remain cached.
+
+Retry job **4306579** requests one GPU, four CPU cores, 16 GB RAM, and 30 minutes
+on account/partition `kellogg`, processing four postings with `llama3.1:8b`, seed 42.
+The retry was pending at the final setup check. The user elected to leave the
+pilot queued and finish setup; live inference, GPU offload, and the final result
+audit remain pending.
+
+In a KLC terminal, check `squeue -j 4306579`,
+`sacct -j 4306579 --format=JobID,State,ExitCode,Elapsed`, and
+`logs/revelio_llm_4306579.log` once execution begins. Outputs will be under the
+project's `executions/4306579_TIMESTAMP/` directory. `pilot.json` reports complete
+only after four valid results and GPU offload are confirmed. Existing remote
+research changes were preserved. See the README's local LLM section for reuse.
+
+## Toolkit job commands
+
+The command is `./klc logs JOB_ID` (plural). To check one toolkit job's current status,
 run `./klc status JOB_ID`; run `./klc status` to list all recorded jobs.
 
 ## Hong Kong measurement milestone 1

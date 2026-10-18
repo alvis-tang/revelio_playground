@@ -191,6 +191,135 @@ Stata export refuses incomplete extracts and datasets above 100,000 rows by defa
 (`--max-rows` overrides this). Export small aggregates/filtered datasets instead of
 loading a full extract into memory.
 
+## Local LLM analysis of Revelio with Slurm
+
+The [Kellogg LLM Batch package](https://rs-kellogg.github.io/llm-batch_pipeline/installation.html)
+can analyze Revelio text after a bounded WRDS extraction. The example extracts
+explicit skills and education requirements from job descriptions. It uses Ollama
+inside a Slurm GPU job; model requests and research data stay on KLC/Quest.
+No commercial API key is needed. The example is illustrative, and its output
+requires researcher review before substantive use.
+
+### Install on KLC
+
+Run these commands in a **KLC terminal**, from the remote repository root.
+Use Python 3.10–3.12; the configured KLC host provides Python 3.10.12. This
+creates a separate environment and source checkout, preserving the existing
+research `.venv`. Skip the clone when that source checkout already exists.
+
+```sh
+export KLC_ROOT="$PWD"
+llm_source="$(dirname "$KLC_ROOT")/llm-batch_pipeline"
+git clone https://github.com/rs-kellogg/llm-batch_pipeline.git "$llm_source"
+python3 -m venv .venv-llm
+.venv-llm/bin/python -m pip install -r requirements-klc.txt -e "$llm_source"
+.venv-llm/bin/python -m pip freeze > .venv-llm/pip-freeze.txt
+git -C "$llm_source" rev-parse HEAD > .venv-llm/package-revision.txt
+.venv-llm/bin/kllm-batch --help
+```
+
+The package is editable: source changes take effect immediately. Update that
+checkout deliberately, then rerun the installation and version-recording commands.
+Each pilot also records its Python version, package version, installed dependencies,
+recorded package revision, Ollama version, and model digests in `environment.json`.
+Refresh `package-revision.txt` after changing the package checkout.
+
+### Extract and run the pilot
+
+If WRDS authentication needs renewal, run `./klc doctor` from your **Mac** and
+approve Duo before extraction. Ensure the new scripts are present on KLC;
+`./klc bootstrap` does not upload arbitrary analysis scripts. Preserve existing
+remote edits when transferring code.
+
+From the remote repository root in a **KLC terminal**:
+
+```sh
+.venv-llm/bin/python scripts/revelio_llm.py extract --limit 20
+```
+
+The command prints a project directory under `results/revelio_llm_TIMESTAMP/`.
+It reuses the job-description preview query, including its 60-second statement
+timeout, and downloads at most 20 arbitrary postings. It rejects empty descriptions,
+empty identifiers, and duplicate job IDs. `source.json` records the query and
+parameters, and `input.jsonl` archives the source records. The package reads the
+companion `input.csv` because its CSV loader preserves numeric-looking identifiers
+as strings, while its JSONL loader can infer numeric types and round long IDs.
+
+Replace `PROJECT_DIRECTORY` below with the printed directory:
+
+```sh
+mkdir -p logs
+.venv-llm/bin/kllm-batch validate -c PROJECT_DIRECTORY/project.yaml
+sbatch scripts/revelio_llm.sbatch PROJECT_DIRECTORY
+```
+
+The submission requests account `kellogg`, partition `kellogg`, one GPU, four CPU
+cores, 16 GB RAM, and 30 minutes. These account/partition settings were verified
+for this project's account. Override Slurm resources before the script name when
+using another allocation, following the
+[Quest Slurm guide](https://rcdsdocs.it.northwestern.edu/systems/quest/user-guide/slurm/slurm.html).
+
+The job loads `git/2.47.0-gcc-12.4.0` for package provenance and `ollama/0.18.2` for inference,
+starts its own server on an available loopback port,
+and stores reusable model weights under `/scratch/$USER/Ollama-Models`. The first
+run downloads `llama3.1:8b` if absent. A derived model fixes the context length at
+32,768 tokens and limits CPU threads to the requested cores. The package validates
+the project, selects four records with seed 42, and runs one record per request
+using `openai_compatible` with synchronous execution and explicit zero token prices.
+Zero token prices describe the local API; they do not measure allocated GPU use.
+
+Only record IDs, titles, and descriptions enter prompts. Company and geography
+remain local result metadata. The example does not silently truncate text; the
+configured input limit blocks oversized requests. Pilot sampling is repeatable;
+model generation is not guaranteed to be identical between runs.
+
+### Monitor and use results
+
+These native Slurm jobs use the scheduler's job ID, rather than `./klc status`:
+
+```sh
+squeue -j JOB_ID
+tail -f logs/revelio_llm_JOB_ID.log
+sacct -j JOB_ID --format=JobID,State,ExitCode,Elapsed,AllocTRES
+# To cancel:
+scancel JOB_ID
+```
+
+Each submission creates a new directory beneath
+`PROJECT_DIRECTORY/executions/JOB_ID_TIMESTAMP/`. Its `pilot.json` contains the
+package run directory and reaches `status: complete` only after all selected IDs
+have valid results and GPU offload is confirmed. Look inside that run directory for
+`outputs/results.csv`, `outputs/results.parquet`, `outputs/failures.jsonl`, prepared
+requests, source snapshots, raw responses, and `run_reports/audit.json`.
+The execution directory also contains `validation.json`, `gpu_usage.json`, and
+`ollama.log`. Join results using string `record_id` or preserved `job_id`, never row
+order. Keep ID columns as text when importing CSV into spreadsheets.
+
+Failures produce a nonzero job exit code and preserve diagnostics. Check the job
+log and failure records before submitting another job. Server startup is bounded,
+and completion, Python errors, and cancellation terminate the owned server process
+group. A new submission creates a new execution and repeats the selected pilot.
+
+To adapt the example, edit its `system.txt`, `user.txt`, `schema.json`, and
+`project.yaml`. Keep `${records_json}` in the user prompt. Use an empty skills
+list or null education requirement for facts absent from the text. Revalidate
+before running. The wrapper resolves paths and a job-local endpoint in a separate
+configuration without overwriting the source project. Override the pilot explicitly:
+
+```sh
+sbatch scripts/revelio_llm.sbatch PROJECT_DIRECTORY --sample-size 20 --seed 42
+```
+
+`--model MODEL_NAME` and `--ollama-module MODULE_NAME` select another installed
+model/server combination. This entry point accepts a positive pilot size no larger
+than the extracted input; larger database extracts require a separately scoped
+extraction workflow. Inputs, outputs, environments, model weights, and credentials
+must stay out of Git.
+
+Offline checks: `python3 -m unittest discover -s tests -p 'test_revelio_llm.py' -v`.
+Run the same command with `.venv-llm/bin/python` on KLC to include the real package
+preparation check for long IDs and exclusion of local metadata from prompts.
+
 ## Code, storage, and validation
 
 Environments, data, outputs, logs, and local settings are ignored by Git. Use Git
