@@ -1,4 +1,4 @@
-"""Validate Malawi cohort selection, serialization, and budget gates."""
+"""Validate country cohort selection, serialization, and budget gates."""
 from decimal import Decimal
 import importlib.util
 from pathlib import Path
@@ -404,6 +404,28 @@ class HongKongLinkedDataTests(LinkedDataTests):
     def test_unsupported_country_rejected(self):
         with self.assertRaisesRegex(ValueError, 'Unsupported country'):
             m.selection_prefix(self.sources, "Hong Kong' OR true --")
+
+
+class PhilippinesLinkedDataTests(LinkedDataTests):
+    country = 'Philippines'
+
+    def test_all_geographic_filters_use_philippines(self):
+        for excluded in ("'Malawi'", "'Hong Kong'"):
+            self.assertNotIn(excluded, self.prefix)
+        for name in ('regions', 'workforce_dynamics_geo', 'sentiment_individual_reviews'):
+            self.assertIn("country='Philippines'", m.selection(name, self.country))
+        for sql, _ in m.raw_batches(self.adapter, self.sources):
+            self.assertNotIn("'Malawi'", sql)
+            self.assertNotIn("'Hong Kong'", sql)
+        self.assertIn("p.country='Philippines'", list(m.raw_batches(self.adapter, self.sources))[-1][0])
+        unmatched_sql = list(m.posting_batches(self.adapter, self.sources, True))[-1][0]
+        self.assertIn("p.country='Philippines'", unmatched_sql)
+
+    def test_wrong_country_estimate_rejected_before_download(self):
+        report = dict(status='complete', version=m.VERSION, unavailable=[],
+                      planning_total_bytes=1000, country='Hong Kong')
+        with self.assertRaisesRegex(ValueError, 'country differs'):
+            m.download(self.adapter, report, Path('/unused'), Path('/unused'), 2)
 
 
 if __name__ == '__main__':

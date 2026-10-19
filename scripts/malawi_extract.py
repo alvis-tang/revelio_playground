@@ -17,7 +17,7 @@ from wrds_data import connection
 BUDGET = 20_000_000_000
 RESERVE = 1_000_000
 VERSION = 2
-COUNTRIES = ('Malawi', 'Hong Kong')
+COUNTRIES = ('Malawi', 'Hong Kong', 'Philippines')
 
 
 def country_sql(country):

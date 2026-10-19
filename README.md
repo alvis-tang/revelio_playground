@@ -525,6 +525,29 @@ If the estimate exceeds the cap or a product is unavailable, the job stops.
 To download from a completed estimate, include `--country 'Hong Kong'` with
 `download --estimate PATH`. A mismatched estimate country is rejected.
 
+## Philippines download with a 100 GB per-run cap
+
+The same workflow supports `--country Philippines`. Run it on KLC after
+synchronizing the extraction scripts and `tools/wrds_data.py`:
+
+```sh
+./klc run python scripts/malawi_extract.py estimate --country Philippines \
+  --resumable --posting-batch-size 1000 --budget-gb 100 --download-if-safe
+```
+
+This produces the same 24-product extract, including the people cohort, with the
+linked-person definition and full histories used for Malawi and Hong Kong,
+without a date restriction. The 100,000,000,000-byte cap includes retained
+estimates and download files; access, available-space, schema, row-count, and
+writing checks still apply. An estimate
+above the cap stops before full download, preserving the resumable checkpoint.
+Other new runs retain their 20 GB default.
+
+Estimates live under `results/philippines_estimate_<timestamp>/`; downloads live
+under `data/philippines_<timestamp>/`. Check the global `manifest.json` for
+`complete` before using the data. See `TASKS.md` for the isolated deployed code,
+launched job, storage snapshot, and preliminary ad-language check.
+
 ### Resumable extraction and raw job-description batches
 
 Raw job descriptions now use disjoint batches of 1,000 unique country posting

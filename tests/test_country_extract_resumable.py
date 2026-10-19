@@ -142,7 +142,7 @@ class PostingBatchesTests(fixtures.HongKongLinkedDataTests):
                 r.run(args, root)
                 self.assertEqual(json.loads((Path(state['output']) / 'manifest.json').read_text())['status'], 'complete')
 
-    def test_25gb_run_passes_cap_to_every_writer_and_resume_skips_estimation(self):
+    def test_selected_cap_reaches_every_writer_and_resume_skips_estimation(self):
         import pandas as pd
         queries = self.fake_queries()
         original = r.m.write_part
@@ -150,22 +150,25 @@ class PostingBatchesTests(fixtures.HongKongLinkedDataTests):
         def write(*args, **kwargs):
             budgets.append(kwargs.get('budget'))
             return original(*args, **kwargs)
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            args = SimpleNamespace(command='estimate', resume=None, estimate=None, budget_gb=25, **self.settings())
-            with patch.object(r, 'Queries', return_value=queries), patch.object(r.m, 'discover', return_value=(self.sources, [])), \
-                    patch.object(r.m, 'execute'), patch.object(pd, 'read_sql_query', side_effect=self.read_sql), \
-                    patch.object(r.m, 'write_part', side_effect=write):
-                r.run(args, root)
-                self.assertTrue(budgets)
-                self.assertEqual(set(budgets), {25_000_000_000})
-                args.resume = next((root / 'results').iterdir()); args.budget_gb = None
-                state = json.loads((args.resume / 'checkpoint.json').read_text())
-                self.assertEqual(state['settings']['budget_bytes'], 25_000_000_000)
-                with patch.object(r, 'estimate_tables', side_effect=AssertionError('must not re-estimate')):
+        for budget_gb in (25, 100):
+            with self.subTest(budget_gb=budget_gb), tempfile.TemporaryDirectory() as tmp:
+                budgets.clear()
+                root = Path(tmp)
+                args = SimpleNamespace(command='estimate', resume=None, estimate=None,
+                                       budget_gb=budget_gb, **self.settings())
+                with patch.object(r, 'Queries', return_value=queries), patch.object(r.m, 'discover', return_value=(self.sources, [])), \
+                        patch.object(r.m, 'execute'), patch.object(pd, 'read_sql_query', side_effect=self.read_sql), \
+                        patch.object(r.m, 'write_part', side_effect=write):
                     r.run(args, root)
-                manifest = json.loads((Path(state['output']) / 'manifest.json').read_text())
-                self.assertEqual(manifest['budget_bytes'], 25_000_000_000)
+                    self.assertTrue(budgets)
+                    self.assertEqual(set(budgets), {budget_gb * 1_000_000_000})
+                    args.resume = next((root / 'results').iterdir()); args.budget_gb = None
+                    state = json.loads((args.resume / 'checkpoint.json').read_text())
+                    self.assertEqual(state['settings']['budget_bytes'], budget_gb * 1_000_000_000)
+                    with patch.object(r, 'estimate_tables', side_effect=AssertionError('must not re-estimate')):
+                        r.run(args, root)
+                    manifest = json.loads((Path(state['output']) / 'manifest.json').read_text())
+                    self.assertEqual(manifest['budget_bytes'], budget_gb * 1_000_000_000)
 
     def test_completed_estimate_resumes_at_25gb_without_repeating_saved_work(self):
         import pandas as pd

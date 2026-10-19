@@ -2,6 +2,7 @@
 
 Hong Kong statuses last checked on October 7, 2026 (America/Chicago), using the
 remote status command over SSH. Other jobs retain their previously recorded snapshots.
+Philippines status last checked on October 18, 2026 at 20:35 CDT over SSH.
 Launch dates below use America/Chicago (CDT, UTC−05:00), converted from the UTC
 timestamp in each KLC job ID. Statuses are a snapshot; use the commands below
 to check current progress.
@@ -23,6 +24,103 @@ to check current progress.
 | `20261007T161803-1bf289` | 2026-10-07 11:18:03 | Hong Kong measurement milestone 1, stages 00-05 (first launch). | Cancelled during raw hashing to relaunch with final configuration; no outputs written | `./klc logs 20261007T161803-1bf289` |
 | `20261007T162019-6e8764` | 2026-10-07 11:20:19 | Hong Kong measurement milestone 1: inventory, cleaning, quarterly panel, diagnostics, migration events, and approximate replication (`hk_revelio/run.py --stages all`). | Complete in 1 h 51 min; raw listing and content hashes unchanged | `./klc logs 20261007T162019-6e8764` |
 | `20261007T181351-e23ad8` | 2026-10-07 13:13:51 | Rerun milestone stages 00 and 03 (data-dictionary join labels; quarantine denominators). | Complete in 36 min; raw listing unchanged; code hash matches the committed code | `./klc logs 20261007T181351-e23ad8` |
+| `20261019T013510-fd02fe` | 2026-10-18 20:35:10 | Estimate the full Philippines-linked extract, then download if all checks and the per-run 100 GB cap pass. | Running: WRDS connected; collecting Philippines person IDs; full download has not started | `./klc logs 20261019T013510-fd02fe` |
+
+## Philippines download with a 100 GB cap
+
+Job **`20261019T013510-fd02fe`** launched on October 18, 2026 at **20:35:10 CDT**
+(America/Chicago), on `klc0503`. It uses the existing detached tmux task runner
+with one CPU thread. At the initial post-launch check, the worker was running,
+WRDS authentication succeeded, and all 23 source tables were accessible. The
+worker was collecting the Philippine person cohort; the checkpoint was
+`incomplete`, with no error. The full download has not started.
+
+The extract includes the same 24 products as the Hong Kong and Malawi workflows
+(23 source tables plus the people cohort). People qualify by Philippine
+residence or any historical Philippine position, and their complete available
+histories are retained. Philippine postings and original descriptions, linked
+companies and schools, reviews, workforce observations, and lookup/context
+products are included across all available dates. There is no sampling fallback.
+
+Launch command from the Mac repository:
+
+```sh
+./klc run python logs/philippines_code_20261018/scripts/malawi_extract.py \
+  estimate --country Philippines --resumable --posting-batch-size 1000 \
+  --budget-gb 100 --download-if-safe
+```
+
+The isolated deployment is `logs/philippines_code_20261018/` beneath
+`/gpfs/kellogg/proj/cxv7409/revelio_playground/`. Its `.klc` link uses the existing
+KLC settings. Deployment SHA-256 checks verified all 60 copied source files.
+The remote checkout's status and hashes of all 11 pre-existing changed/untracked
+files matched their pre-deployment snapshot. Existing research edits were
+preserved. Deployment metadata, preflight results, and test logs remain under
+the ignored deployment directory.
+
+All **177 repository tests passed on KLC, with no skips**, including Philippine
+linked-data fixtures for full histories, geography filters, raw matches,
+serialization and failure handling. Resume tests verify both 25 GB and 100 GB
+caps reach every writer and survive resume without repeating completed
+estimation. Tests used the existing `.venv-llm` interpreter and dependencies,
+with the existing Hong Kong environment's DuckDB package appended to the test
+import path; neither research environment was changed. The worker uses the
+existing toolkit `.venv`.
+
+The GPFS project fileset `kellogg_proj_cxv7409` has a **2 TiB quota**. Immediately
+before launch, `df -B1` reported **120,728,846,336 bytes free** (120.7 decimal GB,
+112.4 GiB). The **100,000,000,000-byte** run cap includes retained estimates and
+download files, leaving about 20.7 GB at the cap if other usage stays constant.
+Missing access, an oversized planning estimate, or insufficient available space
+stops the workflow with its checkpoint preserved. The existing schema, row-count,
+cohort-integrity, per-part writing, and completion checks remain in force.
+
+Paths beneath the remote repository root:
+
+- Estimate/checkpoint: `results/philippines_estimate_20261019T013511632138Z/`
+- Planned data directory: `data/philippines_20261019T013511632138Z/`
+- Job log: `logs/jobs/20261019T013510-fd02fe/output.log`
+
+Monitor with `./klc status 20261019T013510-fd02fe` and
+`./klc logs 20261019T013510-fd02fe`. Resume saved work through the same isolated
+deployment:
+
+```sh
+./klc run python logs/philippines_code_20261018/scripts/malawi_extract.py \
+  estimate --resume \
+  /gpfs/kellogg/proj/cxv7409/revelio_playground/results/philippines_estimate_20261019T013511632138Z
+```
+
+Resume retains the saved Philippines selection, 100 GB cap, and automatic-download
+setting. A running worker does not establish download completion: the final
+global data `manifest.json` must report `complete` before using the extract.
+
+### Preliminary Philippine ad-language check
+
+A read-only pilot during planning inspected **150 unique Philippine posting
+IDs**, 50 each from 2022, 2024, and 2026. **147 descriptions (98%) classified as
+English**; three short descriptions remained uncertain. The yearly counts were
+47 English and three uncertain in 2022, and 50 English in each of 2024 and 2026.
+This supports a preliminary conclusion that the available ads are mostly English,
+but it is not a representative population estimate.
+
+For each year, the query filtered `revelio.postings_cosmos.country='Philippines'`
+and the interval August 31 inclusive through September 7 exclusive, ordered by
+descending `post_date`, and limited candidates to 50 before indexed lateral
+lookups in `revelio.postings_cosmos_raw`. Posting-date index use was verified.
+Date ties were arbitrary, and IDs were deduplicated. Up to two raw matches per
+candidate were checked; missing/empty text or conflicting descriptions would
+have remained separate categories, but none occurred in these 150 records.
+A 2020 query hit its 60-second timeout and is excluded from the reported sample.
+
+Classification used original `description` text after HTML tags, script/style
+content, and HTML entities were handled with Python's HTML parser; translated
+titles were not used. Lingua **2.1.1**, with all supported languages including
+Tagalog, assigned a dominant language only with at least 40 alphabetic characters,
+top confidence at least 0.60, and a lead of at least 0.20 over the next language.
+This measures dominant document language rather than the absence of bilingual
+passages. Text stayed on KLC and was processed in memory; sampled records and
+credentials were not added to Git.
 
 ## Revelio LLM GPU pilot
 
