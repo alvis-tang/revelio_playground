@@ -244,7 +244,137 @@ class PostingBatchesTests(fixtures.HongKongLinkedDataTests):
             self.assertFalse(list(staging.glob('part-*.parquet')))
 
 
+@unittest.skipIf(duckdb is None, 'Install SQL and Parquet test dependencies')
+class BoundedPeopleTests(fixtures.PhilippinesLinkedDataTests):
+    def queries(self):
+        settings = dict(country=self.country, raw_batch_size=1, posting_batch_size=1,
+                        pilot_rows=100, chunksize=1, timeout=60, download_if_safe=True,
+                        bounded_people=True, budget_bytes=100_000_000_000)
+        self.adapter.info.update(mw_raw_batch_size=1, posting_batch_size=1)
+        return SimpleNamespace(settings=settings, info=self.adapter.info,
+                               call=lambda action: action(self.adapter), close=lambda: None)
+
+    def test_all_bounded_products_equal_full_selection_with_shared_entities(self):
+        from collections import Counter
+        for name in ('sentiment_scores', 'layoffs'):
+            self.db.execute(f'CREATE TABLE fixture.{name} (rcid BIGINT, value INTEGER)')
+            self.db.execute(f'INSERT INTO fixture.{name} VALUES (100,1), (100,1), (108,2), (104,3)')
+            self.sources[name] = dict(source='fixture.' + name, columns=[
+                dict(column_name='rcid', data_type='bigint'), dict(column_name='value', data_type='integer')])
+        self.db.execute("INSERT INTO fixture.individual_positions_raw VALUES "
+                        "(2,21,'valid'), (NULL,41,'null match'), (NULL,41,'null match')")
+        self.db.execute("INSERT INTO fixture.individual_user_education_raw VALUES (2,1,'duplicate')")
+        self.db.execute('ALTER TABLE fixture.individual_user_education ALTER COLUMN rsid TYPE DOUBLE')
+        self.db.execute('INSERT INTO fixture.individual_user_education VALUES (1,2,203)')
+        self.db.execute("INSERT INTO fixture.individual_positions VALUES "
+                        "(9223372036854775807,51,'Philippines',101,100)")
+        r.m.prepare(self.adapter, self.sources)
+        queries = self.queries()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            state = dict(settings=queries.settings, sources=self.sources)
+            r.linked_cohorts(queries, state, folder)
+            for name in self.sources:
+                with self.subTest(name=name):
+                    actual = []
+                    for sql, params in r.units(queries, self.sources, name):
+                        self.assertTrue(all(len(value) <= 1 for value in params.values()))
+                        actual.extend(self.adapter.execute(sql, params).cursor.fetchall())
+                    self.assertEqual(Counter(actual), Counter(self.rows(name)))
+            actual = []
+            for sql, params in r.units(queries, self.sources, 'people_cohort'):
+                actual.extend(self.adapter.execute(sql, params).cursor.fetchall())
+            self.assertEqual(Counter(actual), Counter((x,) for x in queries.info['mw_people']))
+
+    def test_empty_people_preserve_null_country_positions_and_country_entities(self):
+        self.db.execute('DELETE FROM fixture.individual_positions WHERE user_id IS NOT NULL')
+        self.db.execute('DELETE FROM fixture.individual_user')
+        r.m.prepare(self.adapter, self.sources)
+        queries = self.queries()
+        with tempfile.TemporaryDirectory() as tmp:
+            r.linked_cohorts(queries, dict(settings=queries.settings, sources=self.sources), Path(tmp))
+            for name in ['individual_positions', 'individual_user_education_raw', 'company_mapping', 'school_mapping']:
+                records = []
+                for sql, params in r.units(queries, self.sources, name):
+                    records.extend(self.adapter.execute(sql, params).cursor.fetchall())
+                self.assertEqual(records, self.rows(name))
+
+    def test_linked_cohort_resume_reuses_units_and_detects_tampering(self):
+        queries = self.queries()
+        calls = []
+        def fail_second(action):
+            calls.append(1)
+            if len(calls) == 2:
+                raise RuntimeError('disconnect')
+            return action(self.adapter)
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            state = dict(settings=queries.settings, sources=self.sources)
+            queries.call = fail_second
+            with self.assertRaisesRegex(RuntimeError, 'disconnect'):
+                r.linked_cohorts(queries, state, folder)
+            saved = json.loads((folder / 'checkpoint.json').read_text())
+            self.assertEqual(len(saved['linked_cohorts']['units']), 1)
+            calls.clear()
+            def collect(action):
+                calls.append(1)
+                return action(self.adapter)
+            queries.call = collect
+            r.linked_cohorts(queries, saved, folder)
+            self.assertEqual(len(calls), len(queries.info['mw_people']))
+            self.assertTrue(saved['linked_cohorts']['complete'])
+            part = next((folder / 'linked_cohorts/unit-000000').glob('part-*.parquet'))
+            part.write_bytes(b'changed')
+            with self.assertRaisesRegex(ValueError, 'cohort files changed'):
+                r.linked_cohorts(queries, saved, folder)
+
+    def test_bounded_whole_run_and_completed_resume(self):
+        import pandas as pd
+        queries = self.queries()
+        def read_sql(sql, db, params=None, **kwargs):
+            return self.adapter.execute(sql, params).cursor.fetchdf()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = SimpleNamespace(command='estimate', resume=None, estimate=None, budget_gb=100, **queries.settings)
+            with patch.object(r, 'Queries', return_value=queries), \
+                    patch.object(r.m, 'discover', return_value=(self.sources, [])), \
+                    patch.object(r.m, 'execute'), patch.object(pd, 'read_sql_query', side_effect=read_sql):
+                r.run(args, root)
+                args.resume = next((root / 'results').iterdir())
+                state = json.loads((args.resume / 'checkpoint.json').read_text())
+                self.assertEqual(state['status'], 'complete')
+                self.assertEqual(state['manifest']['tables']['individual_positions']['rows'], 5)
+                self.assertEqual(state['settings']['budget_bytes'], 100_000_000_000)
+                with patch.object(r, 'estimate_tables', side_effect=AssertionError('must not re-estimate')):
+                    r.run(args, root)
+
+
 class RecoveryTests(unittest.TestCase):
+    def test_untouched_legacy_estimate_upgrades_without_recollecting_cohorts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            state = dict(settings={'budget_bytes': 100_000_000_000},
+                         report={'status': 'incomplete', 'tables': {}},
+                         estimate_units={'individual_positions': {'counts': [], 'sample': None}},
+                         cohorts={'people': {'sha256': 'retained'}, 'postings': {'sha256': 'retained-too'}})
+            original = json.loads(json.dumps(state))
+            r.m.save(folder / 'checkpoint.json', state)
+            r.configure_bounded_people(state, folder)
+            self.assertTrue(state['settings']['bounded_people'])
+            self.assertEqual(state['cohorts'], original['cohorts'])
+            self.assertEqual(state['settings']['budget_bytes'], 100_000_000_000)
+            self.assertEqual(json.loads((Path(state['unit_plan_backup']) / 'checkpoint.json').read_text()), original)
+
+    def test_committed_legacy_unit_plan_is_preserved(self):
+        for change in [{'estimate_units': {'positions': {'counts': [5]}}},
+                       {'manifest': {'status': 'incomplete'}},
+                       {'report': {'status': 'complete', 'tables': {}}}]:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                state = dict(settings={}, report={'status': 'incomplete', 'tables': {}})
+                state.update(change)
+                r.configure_bounded_people(state, Path(tmp))
+                self.assertNotIn('bounded_people', state['settings'])
+
     def test_budget_argument_and_saved_estimate_gate(self):
         import argparse
         self.assertEqual(r.m.positive_gb('25'), 25)

@@ -14,6 +14,11 @@ import malawi_extract as m
 VERSION = 1
 PRIORITY = '__extract_priority'
 SNAPSHOTS = 'Frozen cohorts; separate repeatable-read snapshots per work unit; source contents can change.'
+PEOPLE_TABLES = {'individual_positions', 'individual_user', 'individual_user_raw',
+                 'individual_user_education', 'individual_user_education_raw',
+                 'individual_user_skills', 'people_cohort'}
+LINKED_TABLES = {'company_mapping': ('companies', 'rcid'), 'sentiment_scores': ('companies', 'rcid'),
+                 'layoffs': ('companies', 'rcid'), 'school_mapping': ('schools', 'rsid')}
 
 
 @contextmanager
@@ -153,6 +158,113 @@ def cohort(queries, state, folder, kind):
     print(f'Frozen {kind} cohort: {len(queries.info[info_key]):,} IDs', flush=True)
 
 
+def configure_bounded_people(state, folder):
+    """Upgrade untouched estimates without changing any committed unit numbering."""
+    if 'bounded_people' in state['settings']:
+        return
+    committed = (state.get('status') == 'complete' or state['report'].get('status') == 'complete' or state.get('manifest')
+                 or state['report'].get('tables') or any(state.get('unmatched_units', {}).values())
+                 or any(p.get('counts') for p in state.get('estimate_units', {}).values()))
+    if committed:
+        return  # Legacy estimates and downloads must retain their saved unit plan.
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    backup = folder / ('unit_plan_backup_' + stamp)
+    backup.mkdir()
+    for name in ('checkpoint.json', 'estimate.json'):
+        if (folder / name).exists():
+            shutil.copy2(folder / name, backup / name)
+    state['settings']['bounded_people'] = True
+    state['unit_plan_backup'] = str(backup)
+    m.save(folder / 'checkpoint.json', state)
+    print('Using bounded person-ID queries; frozen cohorts retained.', flush=True)
+
+
+def linkage_units(queries, sources):
+    """Collect company/school IDs once, with bounded people arrays throughout."""
+    country = m.country_sql(queries.settings['country'])
+    s = lambda name: sources[name]['source']
+    def companies(table, condition):
+        return (f"SELECT 'companies' AS kind, v.id::text AS id FROM {s(table)} t "
+                'CROSS JOIN LATERAL (VALUES (t.rcid), (t.ultimate_parent_rcid)) v(id) '
+                f'WHERE {condition} AND v.id IS NOT NULL')
+    base = [f"SELECT 'companies' AS kind, rcid::text AS id FROM {s('company_mapping')} "
+            f'WHERE hq_country={country} AND rcid IS NOT NULL',
+            f"SELECT 'schools' AS kind, rsid::text AS id FROM {s('school_mapping')} "
+            f'WHERE country={country} AND rsid IS NOT NULL',
+            companies('individual_positions', f't.user_id IS NULL AND t.country={country}'),
+            companies('postings_cosmos', f't.country={country}'),
+            companies('sentiment_individual_reviews', f't.country={country}'),
+            f"SELECT 'companies' AS kind, rcid::text AS id FROM {s('workforce_dynamics_geo')} "
+            f'WHERE country={country} AND rcid IS NOT NULL']
+    yield ' UNION '.join(base), {}
+    sql = (companies('individual_positions', 't.user_id = ANY(CAST(:people AS numeric[]))')
+           + f" UNION SELECT 'schools' AS kind, rsid::text AS id FROM {s('individual_user_education')} "
+           'WHERE user_id = ANY(CAST(:people AS numeric[])) AND rsid IS NOT NULL')
+    people = queries.info['mw_people']
+    size = queries.settings['raw_batch_size']
+    for start in range(0, len(people), size):
+        yield sql, {'people': people[start:start + size]}
+
+
+def linked_cohorts(queries, state, folder):
+    """Checkpoint ID discovery; deduplicate shared entities before selecting rows."""
+    from decimal import Decimal
+    import pandas as pd
+    import pyarrow.parquet as pq
+    from sqlalchemy import text
+    progress = state.setdefault('linked_cohorts', {'units': []})
+    target = folder / 'linked_cohorts'
+    target.mkdir(exist_ok=True)
+    for index, (sql, params) in enumerate(linkage_units(queries, state['sources'])):
+        destination = target / f'unit-{index:06d}'
+        if index < len(progress['units']):
+            if not destination.is_dir() or cohort_digest(destination) != progress['units'][index]['sha256']:
+                raise ValueError('Frozen linked cohort files changed or are missing.')
+            continue
+        def collect(db):
+            staging = target / '.pending'
+            clean(staging)
+            used = m.footprint(folder)
+            with db.execution_options(stream_results=True).execute(text(sql), params) as result:
+                part = 0
+                while True:
+                    records = result.fetchmany(5000)
+                    if not records:
+                        break
+                    frame = pd.DataFrame([tuple(row) for row in records], columns=['kind', 'id'])
+                    used += m.write_part(frame, staging / f'part-{part:06d}.parquet', used,
+                                         budget=effective_budget(state))
+                    part += 1
+            db.execution_options(stream_results=False)
+            return staging
+        staging = queries.call(collect)
+        if destination.exists():
+            shutil.rmtree(destination)  # Rename without a saved checkpoint is uncommitted.
+        staging.replace(destination)
+        progress['units'].append({'sha256': cohort_digest(destination)})
+        m.save(folder / 'checkpoint.json', state)
+        print(f'Linked company/school cohort: committed unit {index + 1}', flush=True)
+    ids = {'companies': set(), 'schools': set()}
+    for index in range(len(progress['units'])):
+        for path in sorted((target / f'unit-{index:06d}').glob('part-*.parquet')):
+            data = pq.read_table(path).to_pydict()
+            for kind, identifier in zip(data['kind'], data['id']):
+                # Education uses floating school IDs; mapping tables use integers.
+                # Numeric equality must deduplicate 203 and 203.0 across units.
+                ids[kind].add(Decimal(identifier))
+    for kind, values in ids.items():
+        queries.info[kind] = [str(value) for value in sorted(values)]
+        print(f'Frozen linked {kind}: {len(values):,} IDs', flush=True)
+    progress['complete'] = True
+    m.save(folder / 'checkpoint.json', state)
+
+
+def ensure_linked_cohorts(queries, state, folder, name):
+    if (queries.settings.get('bounded_people') and name in LINKED_TABLES
+            and 'companies' not in queries.info):
+        linked_cohorts(queries, state, folder)
+
+
 def units(queries, sources, name, unmatched=False):
     """Deterministic units built only from frozen cohorts and saved settings."""
     from types import SimpleNamespace
@@ -171,6 +283,41 @@ def units(queries, sources, name, unmatched=False):
                "WHERE r.user_id=p.user_id AND r.education_number=p.education_number)")
         for start in range(0, len(people), size):
             yield sql, {'people': people[start:start + size]}
+    elif queries.settings.get('bounded_people'):
+        source = source_for(sources, name)
+        size = queries.settings['raw_batch_size']
+        if name in PEOPLE_TABLES:
+            fields = m.query(name, source).split(' FROM ', 1)[0]
+            if name == 'people_cohort':
+                sql = fields + ' FROM unnest(CAST(:people AS numeric[])) AS t(user_id)'
+            else:
+                sql = fields + f' FROM {source["source"]} t WHERE t.user_id = ANY(CAST(:people AS numeric[]))'
+                if name == 'individual_user_education_raw':
+                    sql += (f' AND EXISTS (SELECT 1 FROM {sources["individual_user_education"]["source"]} e '
+                            'WHERE e.user_id=t.user_id AND e.education_number=t.education_number)')
+            people = queries.info['mw_people']
+            for start in range(0, len(people), size):
+                yield sql, {'people': people[start:start + size]}
+            if name == 'individual_positions':
+                # NULL-person rows belong to one separate unit, never every batch.
+                yield (fields + f' FROM {source["source"]} t WHERE t.user_id IS NULL '
+                       f'AND t.country={m.country_sql(country)}'), {}
+            elif not people:
+                yield sql, {'people': []}
+        elif name in LINKED_TABLES:
+            kind, column = LINKED_TABLES[name]
+            fields = m.query(name, source).split(' FROM ', 1)[0]
+            sql = fields + f' FROM {source["source"]} t WHERE t.{column} = ANY(CAST(:people AS numeric[]))'
+            ids = queries.info[kind]
+            for start in range(0, len(ids), size):
+                yield sql, {'people': ids[start:start + size]}
+            if not ids:
+                yield sql, {'people': []}
+        else:
+            sql = m.query(name, source, country=country)
+            if name == 'postings_cosmos':
+                sql = sql.replace('FROM mw_postings t', f'FROM {source["source"]} t WHERE country={m.country_sql(country)}')
+            yield sql, {}
     else:
         prefix = m.selection_prefix(sources, country)
         yield m.query(name, source_for(sources, name), prefix, country), {'people': queries.info['mw_people']}
@@ -204,6 +351,7 @@ def estimate_tables(queries, state, folder, sources):
     import pandas as pd
     settings = state['settings']
     for name, source in sources.items():
+        ensure_linked_cohorts(queries, state, folder, name)
         progress = state['estimate_units'].setdefault(name, {'counts': [], 'sample': None})
         table_folder = folder / name
         table_folder.mkdir(exist_ok=True)
@@ -302,9 +450,11 @@ def download_tables(queries, state, folder, sources):
     manifest = state.setdefault('manifest', dict(status='incomplete', country=state['settings']['country'],
         started_at_utc=m.now(), estimate=str(folder), tables={}, budget_bytes=effective_budget(state),
         snapshots=SNAPSHOTS, resumable=True, raw_batch_size=state['settings']['raw_batch_size'],
-        posting_batch_size=state['settings']['posting_batch_size']))
+        posting_batch_size=state['settings']['posting_batch_size'],
+        bounded_people=state['settings'].get('bounded_people', False)))
     m.save(output / 'manifest.json', manifest)
     for name, source in sources.items():
+        ensure_linked_cohorts(queries, state, folder, name)
         table_folder = output / name
         table_folder.mkdir(exist_ok=True)
         progress = manifest['tables'].setdefault(name, dict(status='incomplete', units=[], rows=0, parts=0, bytes=0,
@@ -380,12 +530,14 @@ def run(args, root):
             settings = {key: getattr(args, key) for key in ('country', 'raw_batch_size', 'posting_batch_size',
                         'pilot_rows', 'chunksize', 'timeout', 'download_if_safe')}
             settings['budget_bytes'] = (getattr(args, 'budget_gb', None) or 20) * 1_000_000_000
+            settings['bounded_people'] = True
             report = dict(status='incomplete', version=m.VERSION, country=args.country, resumable=True,
                           snapshots=SNAPSHOTS, started_at_utc=m.now(), tables={}, unavailable=[], budget_bytes=settings['budget_bytes'])
             state = dict(version=VERSION, root=str(root), status='incomplete', settings=settings, cohorts={},
                          estimate_units={}, unmatched_units={}, report=report,
                          output=str(root / 'data' / (args.country.lower().replace(' ', '_') + '_' + stamp)))
             m.save(path, state)
+        configure_bounded_people(state, folder)
         apply_budget(state, folder, getattr(args, 'budget_gb', None))
         print(f'Resumable estimate: {folder}; data: {state["output"]}', flush=True)
         state.pop('error_type', None)
@@ -417,7 +569,8 @@ def run(args, root):
                 report = state['report']
                 report['unmatched_raw'] = unmatched_checks(queries, state, folder, 'estimate')
                 report.update(sources=sources, raw_batch_size=state['settings']['raw_batch_size'],
-                              posting_batch_size=state['settings']['posting_batch_size'])
+                              posting_batch_size=state['settings']['posting_batch_size'],
+                              bounded_people=state['settings'].get('bounded_people', False))
                 retained = m.footprint(folder)
                 report['expected_total_bytes'] = sum(t['expected_bytes'] for t in report['tables'].values()) + retained
                 report['planning_total_bytes'] = sum(t['planning_bytes'] for t in report['tables'].values()) + retained + m.RESERVE

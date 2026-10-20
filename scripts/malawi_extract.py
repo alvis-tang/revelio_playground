@@ -603,7 +603,8 @@ def main(argv=None):
     parser.add_argument('--budget-gb', type=positive_gb, help='Whole decimal GB cap; default 20 for new runs, saved cap on resume')
     parser.add_argument('--estimate', type=Path, help='Completed estimate directory for download')
     parser.add_argument('--pilot-rows', type=int, default=2000)
-    parser.add_argument('--raw-batch-size', type=int, default=1000, help='People per raw-position query; download uses saved estimate value')
+    parser.add_argument('--raw-batch-size', type=int, default=1000,
+                        help='People per resumable query (raw positions otherwise); download uses saved estimate value')
     parser.add_argument('--posting-batch-size', type=int, default=1000)
     parser.add_argument('--resumable', action='store_true', help='Checkpoint work units; reconnect using separate snapshots')
     parser.add_argument('--resume', type=Path, help='Resume a run from its estimate directory using saved settings')

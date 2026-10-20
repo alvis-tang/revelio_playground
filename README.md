@@ -572,9 +572,21 @@ schemas, completed units, counts, pilot state, and the data directory. A file
 lock prevents concurrent workers. The old incomplete Hong Kong estimate cannot
 be resumed because it predates this checkpoint format.
 
+New resumable runs also batch structured employment, profiles, education, skills,
+and the people cohort using `--raw-batch-size` (default 1,000). NULL-person
+country employment rows form a separate unit. Linked company and school IDs are
+collected in checkpointed units and deduplicated numerically before their tables
+are queried in bounded batches. These retained ID files count toward the run cap.
+No query needs the entire person cohort as a PostgreSQL array.
+
+An older checkpoint with no committed estimation or download units upgrades to
+this plan after backing up its metadata, preserving its frozen cohorts and cap.
+Older checkpoints with saved table units retain their original query plan and
+unit numbering; completed Hong Kong and Malawi extracts are unaffected.
+
 Transport failures retry the unfinished unit twice on fresh connections, with
-two-second delays. Raw employment and raw posting products recover by batch;
-other products recover by whole table. Unmatched employment, education, and
+two-second delays. Person-linked and raw posting products recover by batch;
+country and lookup products recover by whole table. Unmatched employment, education, and
 posting checks recover by batch. Completed units survive restarts. Partial files
 from an uncommitted unit are removed before replay, preventing duplicate output.
 Statement timeouts, missing permissions, schema changes, count mismatches, and

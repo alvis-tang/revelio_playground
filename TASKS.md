@@ -2,7 +2,8 @@
 
 Hong Kong statuses last checked on October 7, 2026 (America/Chicago), using the
 remote status command over SSH. Other jobs retain their previously recorded snapshots.
-Philippines status last checked on October 18, 2026 at 20:35 CDT over SSH.
+Philippines status and completed Hong Kong/Malawi manifests checked on October 19,
+2026 at 23:41:57 CDT over SSH. The Philippines restart launched at 23:40:42 CDT.
 Launch dates below use America/Chicago (CDT, UTC−05:00), converted from the UTC
 timestamp in each KLC job ID. Statuses are a snapshot; use the commands below
 to check current progress.
@@ -16,7 +17,7 @@ to check current progress.
 | `20261002T152310-a233db` | 2026-10-02 10:23:10 | Worldwide historical country coverage in resumable numeric person-ID batches (range width 1,000,000; 900-second query limit). | Running | `./klc logs 20261002T152310-a233db` |
 | `20261002T153034-8dd58f` | 2026-10-02 10:30:34 | Restart Malawi storage estimate and gated download with TCP keepalives and revised raw-position joins (`estimate --download-if-safe`). | Failed: WRDS SSL EOF during raw-position count | `./klc logs 20261002T153034-8dd58f` |
 | `20261002T214915-661800` | 2026-10-02 16:49:15 | Restart Malawi estimate and gated download with indexed raw-position person batches (`estimate --download-if-safe`). | Failed: WRDS SSL EOF during unmatched-education check | `./klc logs 20261002T214915-661800` |
-| `20261003T034030-cc5164` | 2026-10-02 22:40:30 | Restart Malawi estimate and gated download with indexed unmatched-education batches (`estimate --download-if-safe`). | Running: connected to WRDS; selecting cohort | `./klc logs 20261003T034030-cc5164` |
+| `20261003T034030-cc5164` | 2026-10-02 22:40:30 | Restart Malawi estimate and gated download with indexed unmatched-education batches (`estimate --download-if-safe`). | Complete: global manifest `complete`, 485,247,160 downloaded bytes, finished 2026-10-03 04:55:34 CDT | `./klc logs 20261003T034030-cc5164` |
 | `20261003T235606-6f880b` | 2026-10-03 18:56:06 | First Hong Kong estimate-and-download launch from an isolated code copy. | Failed before WRDS connection: isolated copy lacked KLC settings link | `./klc logs 20261003T235606-6f880b` |
 | `20261003T235630-408292` | 2026-10-03 18:56:30 | Estimate all Hong Kong-linked products, then download if access checks and the 20 GB gate pass. | Failed: WRDS SSL EOF while counting raw job descriptions; full download never started | `./klc logs 20261003T235630-408292` |
 | `20261004T140024-56dfbb` | 2026-10-04 09:00:24 | Fresh Hong Kong estimate and gated download with 1,000-ID raw posting batches, checkpoints, and transport retries. | Stopped at 20 GB gate: completed estimate projects 21.01 GB; no full download started | `./klc logs 20261004T140024-56dfbb` |
@@ -24,7 +25,62 @@ to check current progress.
 | `20261007T161803-1bf289` | 2026-10-07 11:18:03 | Hong Kong measurement milestone 1, stages 00-05 (first launch). | Cancelled during raw hashing to relaunch with final configuration; no outputs written | `./klc logs 20261007T161803-1bf289` |
 | `20261007T162019-6e8764` | 2026-10-07 11:20:19 | Hong Kong measurement milestone 1: inventory, cleaning, quarterly panel, diagnostics, migration events, and approximate replication (`hk_revelio/run.py --stages all`). | Complete in 1 h 51 min; raw listing and content hashes unchanged | `./klc logs 20261007T162019-6e8764` |
 | `20261007T181351-e23ad8` | 2026-10-07 13:13:51 | Rerun milestone stages 00 and 03 (data-dictionary join labels; quarantine denominators). | Complete in 36 min; raw listing unchanged; code hash matches the committed code | `./klc logs 20261007T181351-e23ad8` |
-| `20261019T013510-fd02fe` | 2026-10-18 20:35:10 | Estimate the full Philippines-linked extract, then download if all checks and the per-run 100 GB cap pass. | Running: WRDS connected; collecting Philippines person IDs; full download has not started | `./klc logs 20261019T013510-fd02fe` |
+| `20261019T013510-fd02fe` | 2026-10-18 20:35:10 | Estimate the full Philippines-linked extract, then download if all checks and the per-run 100 GB cap pass. | Failed: WRDS memory-allocation error on the first structured-position count; both ID cohorts saved, no table units committed | `./klc logs 20261019T013510-fd02fe` |
+| `20261020T044042-4eaae7` | 2026-10-19 23:40:42 | Resume the saved Philippines estimate with bounded person and linked-entity queries and the same 100 GB cap. | Running: both saved cohorts verified; 17 employment estimation units committed, 40,534 rows counted; no error | `./klc logs 20261020T044042-4eaae7` |
+
+## Philippines restart with bounded person queries
+
+Job **`20261020T044042-4eaae7`** launched at **23:40:42 CDT on October 19,
+2026**, using the same detached tmux runner and one CPU thread. It resumes
+`results/philippines_estimate_20261019T013511632138Z/` and retains the original
+`data/philippines_20261019T013511632138Z/` output path and **100 GB** cap.
+
+The first job froze **13,171,232 person IDs** and **12,511,346 posting IDs**,
+then failed on the first structured-position count with PostgreSQL
+`invalid memory alloc request size 1073741824`. That query still supplied all
+13.17 million people in one numeric array. Earlier batching covered raw
+employment records, raw posting descriptions, and unmatched-record checks;
+it did not bound the ordinary employment/profile queries or linked-entity
+selection. Restarting that code unchanged would repeat the oversized query.
+
+The repair batches all person-linked products in **1,000-ID units**, places
+NULL-person country employment rows in a separate unit, and collects linked
+company/school IDs in checkpointed units. Numeric deduplication preserves
+shared entities and equates floating school IDs with integer mapping IDs.
+Full histories, duplicate raw rows, unmatched checks, and the storage gate
+remain covered. Untouched legacy estimates back up their metadata before
+switching plans; older checkpoints with committed units keep their saved plan.
+
+Both saved cohort SHA-256 values match the originals. No cohort collection
+needed to be repeated. At **23:41:57 CDT**, the running worker had committed
+**17 employment estimation batches covering 40,534 rows**, with no error.
+The isolated deployment is
+`logs/philippines_batched_code_20261019_bb2185/`; source hashes, preserved remote
+research-file hashes, test logs, preflight results, and launch metadata are
+stored there. All 11 pre-existing changed/untracked remote files were preserved.
+Available project space immediately before restart was **120,519,131,136 bytes**.
+
+All **207 repository tests passed on KLC with no skips**. New checks compare
+bounded queries with the complete linked-data reference selection, including
+duplicate raw records, NULL-person records, large IDs, shared companies,
+mixed numeric school IDs, partial linkage recovery, and completed-run resume.
+Live first/middle/last 1,000-person windows used WRDS person-ID indexes:
+employment counts took **0.87–1.08 seconds**, profile counts **0.75–1.17
+seconds**, and matched raw-education counts **4.00–4.85 seconds**. Linked-ID
+queries completed in **1.93–2.49 seconds**, and an employment pilot returned
+2,000 sampled rows from 2,172 matching records.
+
+Resume this job's checkpoint with the repaired deployment:
+
+```sh
+./klc run python logs/philippines_batched_code_20261019_bb2185/scripts/malawi_extract.py \
+  estimate --resume \
+  /gpfs/kellogg/proj/cxv7409/revelio_playground/results/philippines_estimate_20261019T013511632138Z
+```
+
+The worker is still estimating; full download starts only after the completed
+estimate passes the cap and available-space checks. Use the final global
+`manifest.json` status, rather than a running-worker status, to establish completion.
 
 ## Philippines download with a 100 GB cap
 
