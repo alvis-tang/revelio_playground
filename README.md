@@ -150,6 +150,61 @@ compact previews and the output path. Zero results or query/access failures fail
 the job; check permissions and authenticate interactively with `./klc doctor`
 before retrying if needed.
 
+### Random English Hong Kong posting sample
+
+Use the completed Hong Kong Parquet extract on KLC to sample 300 distinct,
+confidently English descriptions across all available dates and posting sources:
+
+```sh
+export KLC_ROOT="$PWD"
+.venv-llm/bin/python scripts/hk_job_postings_sample.py sample
+```
+
+Synchronize `scripts/hk_job_postings_sample.py` and `scripts/revelio_multilingual.py`
+before running. The existing `.venv-llm` environment needs PyArrow and
+`lingua-language-detector==2.1.1`. The default source is
+`data/hong_kong_20261004T140024976790Z/` on KLC, completed October 6, 2026.
+`--source` and `--output` accept alternative directories; the source is read only
+and output must be new and outside it. `--count` defaults to 300. Each run generates
+and records a fresh random seed; pass `--seed INTEGER` to reproduce the candidate
+order against the same snapshot and detector versions.
+
+Candidates are drawn uniformly without replacement from all raw row positions.
+The first 300 eligible descriptions are retained, with no date or source filter.
+The English policy reuses the multilingual pilot's all-language Lingua detector:
+confident English passages must cover at least 85% of alphabetic characters,
+and any confidently detected non-English passage with at least 40 letters excludes
+the description. Passage confidence must be at least 0.60 with a 0.20 margin over
+the next language. Empty and uncertain descriptions are excluded. This is an
+automated language screen, not a guarantee that every word is English.
+
+The output is `data/hk_english_postings_300_<timestamp>/`, containing 300
+`<job_id>.json` files and `manifest.json`. Each posting file preserves every raw
+column, including complete original description text, Unicode, whitespace,
+formatting, and nulls. All structured posting columns are nested under `posting`;
+dates use ISO strings and identifiers remain strings. Distinct job IDs may have
+identical description text; sampling does not deduplicate descriptions.
+
+The manifest records the source snapshot, seed, sampling algorithm, candidate
+counts, selected row positions, language audits, software versions, code hashes,
+and SHA-256 checksum for each posting file. Completion requires 300 unique IDs,
+matching Hong Kong metadata, and exact comparison of every raw field in the saved
+JSON against source Parquet. Failures retain an incomplete manifest and do not
+overwrite prior exports. Rerun into a new directory after failure.
+
+Copy the completed directory from KLC to local `data/`, then verify every checksum
+and record locally without installing PyArrow or Lingua:
+
+```sh
+python3 scripts/hk_job_postings_sample.py verify data/hk_english_postings_300_TIMESTAMP
+```
+
+On KLC, add `--source /kellogg/proj/cxv7409/revelio_playground/data/hong_kong_20261004T140024976790Z`
+to repeat the exact raw-field comparison. The manifest retains the original KLC
+validation results; the local command separately reports transfer verification.
+Keep all extracted JSON files out of Git under ignored `data/`.
+Run offline checks with `.venv-llm/bin/python -m unittest discover -s tests -p 'test_hk_job_postings_sample.py' -v`.
+
 The extraction and Stata export examples below are optional workflows. They
 download records to KLC as Parquet files and create a local Stata dataset,
 consuming KLC storage; they are not needed for counts-only country coverage.
