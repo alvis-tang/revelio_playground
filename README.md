@@ -205,6 +205,52 @@ validation results; the local command separately reports transfer verification.
 Keep all extracted JSON files out of Git under ignored `data/`.
 Run offline checks with `.venv-llm/bin/python -m unittest discover -s tests -p 'test_hk_job_postings_sample.py' -v`.
 
+### Overlapping Hong Kong job packets
+
+Create a two-sheet workbook and two printable PDFs from a verified local 300-job
+sample. Install the dedicated dependencies and Chromium once:
+
+```sh
+.venv-llm/bin/python -m pip install -r requirements-job-packets.txt
+.venv-llm/bin/python -m playwright install chromium
+.venv-llm/bin/python scripts/hk_job_posting_groups.py data/hk_english_postings_300_TIMESTAMP
+```
+
+The generator shuffles sorted job IDs using a fresh, recorded seed. Each group
+contains 200 distinct jobs: the same 100 shared jobs first, in the same order,
+followed by 100 jobs exclusive to that group. Pass `--seed INTEGER` to reproduce
+an allocation and `--output NEW_DIRECTORY` to choose a destination. Existing
+destinations and destinations inside the source sample are refused.
+
+Outputs live under ignored `data/hk_posting_groups_<timestamp>/`:
+
+- `groups.xlsx`: sheets `Group 1` and `Group 2`, each with `job_id` stored as text
+  and `page_number`, the 1-based starting page in that group's PDF. The first
+  100 rows of jobs are shaded to identify the shared jobs.
+- `group_1.pdf` and `group_2.pdf`: A4 pages with consecutive page numbers and
+  11-point body text. Each job starts on a new page with its ID, title, available
+  employer, location, and complete original description. Long jobs span pages;
+  PDFs may exceed 200 pages. Basic source HTML formatting is rendered without
+  scripts, external resources, or source attributes. Legacy private-use bullet
+  markers are rendered as standard bullets, and redundant HTML breaks around
+  blocks and list items are collapsed. CJK and emoji glyphs use system font
+  fallbacks; install suitable fonts if running on a headless Linux host.
+- `manifest.json`: completion status, seed, allocation algorithm, source manifest
+  checksum, ordered IDs and starting pages, PDF page counts, software versions,
+  artifact checksums, and validation results.
+
+Generation verifies source checksums before and after rendering, exact group
+sizes and overlap, PDF job order, all description letters and numbers after
+Unicode/whitespace normalization, and every saved workbook page reference.
+Incomplete runs retain an `incomplete` manifest; rerun into a new directory.
+The original JSON sample is never modified, and data artifacts stay out of Git.
+
+Run allocation, formatting, workbook, and Chromium pagination checks with:
+
+```sh
+RUN_JOB_PACKET_PDF_TESTS=1 .venv-llm/bin/python -m unittest discover -s tests -p 'test_hk_job_posting_groups.py' -v
+```
+
 The extraction and Stata export examples below are optional workflows. They
 download records to KLC as Parquet files and create a local Stata dataset,
 consuming KLC storage; they are not needed for counts-only country coverage.
